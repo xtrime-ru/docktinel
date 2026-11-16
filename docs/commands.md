@@ -24,7 +24,7 @@ The daemon's stop grace is the budget for shutdown jobs together, followed by a 
 
 `--startup-grace` only allows a missing initial snapshot; a valid snapshot carries its own startup deadline. Lost or corrupt state after initialization triggers escalation. If both status and identity files are missing, healthcheck waits out its startup grace, then attempts to identify the unique direct child of PID 1; if ambiguous, it reports an error without guessing a PID.
 
-Exit status is zero for successful CLI operations, nonzero for errors. Healthcheck returns nonzero while starting/stopping or on a critical fault; degraded runtime returns zero. `status` reports whether it could read the snapshot, not whether that snapshot is fresh or healthy. Task commands have no reserved special exit codes.
+Exit status is zero for successful CLI operations, nonzero for errors. Healthcheck returns nonzero while starting/stopping or on a critical fault; degraded runtime returns zero. `status` queries the live daemon with a five-second deadline; success means the query completed, regardless of the reported health. Healthcheck reads the atomic snapshot independently of the daemon's [local HTTP API](api.md). Task commands have no reserved special exit codes.
 
 ## Register a task
 

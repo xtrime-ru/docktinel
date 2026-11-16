@@ -6,10 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -24,7 +22,7 @@ Usage: docktinel [--runtime-dir DIR] COMMAND
   startup      Run startup tasks and wait for the result
   exec         Register this entrypoint PID and replace it with the application
   restart      Request an orderly container restart with --reason TEXT
-  status       Read the latest snapshot (--json for machine-readable output)
+  status       Query the daemon state (--json for machine-readable output)
   healthcheck  Report health; stop the application if the watchdog is stuck
   version      Show build version
 
@@ -90,7 +88,7 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		if *timeout <= 0 {
 			return errors.New("timeout must be positive")
 		}
-		return Call(dir, Request{Op: "startup"}, *timeout)
+		return callAPI(dir, "POST", "/v1/startup", nil, nil, *timeout)
 	case "exec":
 		if err := f.Parse(args); err != nil {
 			return err
@@ -107,7 +105,7 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		if err != nil {
 			return err
 		}
-		if err := Call(dir, Request{Op: "exec", Main: &p}, 5*time.Second); err != nil {
+		if err := callAPI(dir, "POST", "/v1/main", &p, nil, 5*time.Second); err != nil {
 			return err
 		}
 		return syscall.Exec(path, argv, os.Environ())
@@ -116,14 +114,14 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		if err := parse(f, args); err != nil {
 			return err
 		}
-		return Call(dir, Request{Op: "restart", Reason: *reason}, 5*time.Second)
+		return callAPI(dir, "POST", "/v1/restart", restartRequest{Reason: *reason}, nil, 5*time.Second)
 	case "status":
 		asJSON := f.Bool("json", false, "print JSON status")
 		if err := parse(f, args); err != nil {
 			return err
 		}
-		s, err := readStatus(dir)
-		if err != nil {
+		var s Status
+		if err := callAPI(dir, "GET", "/v1/status", nil, &s, 5*time.Second); err != nil {
 			return err
 		}
 		if *asJSON {
@@ -213,38 +211,5 @@ func addCLI(args []string, dir string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return Call(dir, Request{Op: "add", Task: &t}, 5*time.Second)
-}
-
-func Call(dir string, request Request, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var conn net.Conn
-	var err error
-	// Bounded connection retry avoids a sleep between daemon & and the first add.
-	for time.Now().Before(deadline) {
-		conn, err = net.DialTimeout("unix", filepath.Join(dir, "control.sock"), 200*time.Millisecond)
-		if err == nil {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if err != nil {
-		return fmt.Errorf("connect to daemon: %w", err)
-	}
-	if conn == nil {
-		return errors.New("daemon connection deadline exceeded")
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(deadline)
-	if err := json.NewEncoder(conn).Encode(request); err != nil {
-		return err
-	}
-	var response Response
-	if err := json.NewDecoder(io.LimitReader(conn, 1<<20)).Decode(&response); err != nil {
-		return err
-	}
-	if response.Error != "" {
-		return errors.New(response.Error)
-	}
-	return nil
+	return callAPI(dir, "POST", "/v1/tasks", &t, nil, 5*time.Second)
 }

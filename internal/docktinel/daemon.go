@@ -4,10 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -111,15 +109,10 @@ func RunDaemon(cfg Config) error {
 		return err
 	}
 	slog.Info("Docktinel listening", "socket", socket)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go d.handleConnection(conn)
-		}
-	}()
+	server := d.controlServer()
+	defer server.Close()
+	serveErrors := make(chan error, 1)
+	go func() { serveErrors <- server.Serve(listener) }()
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
@@ -127,6 +120,10 @@ func RunDaemon(cfg Config) error {
 	defer ticker.Stop()
 	for {
 		select {
+		case err := <-serveErrors:
+			d.stop("control API stopped", true)
+			<-d.done
+			return fmt.Errorf("serve control API: %w", err)
 		case <-signals:
 			d.stop("termination signal", false)
 		case <-d.done:
@@ -168,43 +165,6 @@ func (d *Daemon) snapshot() Status {
 
 func (d *Daemon) publish() error {
 	return writeJSON(filepath.Join(d.cfg.Dir, "status.json"), d.snapshot())
-}
-
-func (d *Daemon) handleConnection(conn net.Conn) {
-	defer conn.Close()
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var req Request
-	if err := json.NewDecoder(io.LimitReader(conn, 1<<20)).Decode(&req); err != nil {
-		_ = json.NewEncoder(conn).Encode(Response{Error: err.Error()})
-		return
-	}
-	response := d.handle(req)
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_ = json.NewEncoder(conn).Encode(response)
-}
-
-func (d *Daemon) handle(req Request) Response {
-	var err error
-	switch req.Op {
-	case "add":
-		err = d.add(req.Task)
-	case "startup":
-		err = d.startup()
-	case "exec":
-		err = d.attach(req.Main)
-	case "restart":
-		if req.Reason == "" {
-			err = errors.New("restart requires a reason")
-		} else {
-			d.stop(req.Reason, true)
-		}
-	default:
-		err = fmt.Errorf("unknown operation %q", req.Op)
-	}
-	if err != nil {
-		return Response{Error: err.Error()}
-	}
-	return Response{}
 }
 
 func (d *Daemon) add(task *Task) error {

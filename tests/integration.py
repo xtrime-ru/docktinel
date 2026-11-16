@@ -45,6 +45,8 @@ class Containers(unittest.TestCase):
             args += [IMAGE]
         docker(*args)
         eventually(lambda: self.status().get("phase") == "runtime")
+        # Live API status may lead the independently published health snapshot.
+        eventually(lambda: docker("exec", self.name, "docktinel", "healthcheck", check=False).returncode == 0)
 
     def status(self):
         return json.loads(docker("exec", self.name, "docktinel", "status", "--json").stdout)
@@ -57,6 +59,12 @@ class Containers(unittest.TestCase):
         docker("exec", self.name, "docktinel", "healthcheck")
         docker("exec", self.name, "touch", "/srv/fail-health")
         eventually(lambda: not self.running())
+
+    def test_restart_request_stops_container(self):
+        self.start()
+        docker("exec", self.name, "docktinel", "restart", "--reason", "HTTP API integration test")
+        eventually(lambda: not self.running())
+        self.assertIn("HTTP API integration test", docker("logs", self.name).stderr)
 
     def test_degraded_dependency_recovers(self):
         self.start('''

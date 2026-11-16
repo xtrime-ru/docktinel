@@ -120,6 +120,6 @@ Go 1.26+ is required for source builds. Docker builds use a pinned Go toolchain 
 
 Docktinel provides scheduling, retries, lifecycle coordination and escalation. Readiness checks, DNS queries, cache reinitialization and application-specific refresh logic remain ordinary commands/scripts. This keeps the binary small and avoids coupling it to AdGuard, CoreDNS or a VPN implementation.
 
-Logs and task output go to container stdout/stderr. The state file omits task arguments and environment; helper output can still contain secrets, so design scripts accordingly. Runtime files and the control socket are private to the configured user. `status --json` is a diagnostic snapshot with schema version 1, not a remote control API.
+Logs and task output go to container stdout/stderr. The state file omits task arguments and environment; helper output can still contain secrets, so design scripts accordingly. Runtime files and the control socket are private to the configured user. The CLI uses a [local HTTP API over a Unix socket](docs/api.md). `status --json` queries the live daemon and returns schema version 1; `healthcheck` reads the atomic state file independently so it can detect a frozen daemon.
 
 [MIT License](LICENSE).

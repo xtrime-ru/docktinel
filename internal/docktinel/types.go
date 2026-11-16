@@ -109,14 +109,10 @@ type Status struct {
 	Tasks           []TaskStatus `json:"tasks"`
 }
 
-type Request struct {
-	Op     string    `json:"op"`
-	Task   *Task     `json:"task,omitempty"`
-	Main   *Identity `json:"main,omitempty"`
-	Reason string    `json:"reason,omitempty"`
+type apiError struct {
+	Error string `json:"error"`
 }
 
-type Response struct {
-	Error  string  `json:"error,omitempty"`
-	Status *Status `json:"status,omitempty"`
+type restartRequest struct {
+	Reason string `json:"reason"`
 }
