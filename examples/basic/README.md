@@ -9,7 +9,7 @@ curl http://127.0.0.1:8080
 docker compose -f examples/basic/compose.yml exec demo docktinel status
 ```
 
-The entrypoint prepares a page, starts the HTTP server, waits for readiness, then checks it every second. A maintenance job logs a message every 30 seconds.
+The array-form Docker entrypoint runs `docktinel startup` directly. It auto-starts the daemon and loads `/etc/docktinel/config.json`, prepares a page, starts the HTTP server, waits for readiness, then checks it every second. A maintenance job logs a message every 30 seconds. Set `CHECK_INTERVAL` to change the check interval, `DEMO_MESSAGE` for the served text, and `DOCKTINEL_STARTUP_TIMEOUT` for the shared startup/readiness budget.
 
 Simulate a critical failure:
 

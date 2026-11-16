@@ -45,3 +45,8 @@ inspection, read the last atomic `status.json` snapshot directly. Docker
 `healthcheck` always reads this file independently of the API: a frozen daemon
 must still be detected and its application stopped. Live API status does not
 replace or refresh that file.
+
+HTTP API clients never auto-start a daemon. The CLI only provides automatic
+startup through `startup` / `exec`, and requires an existing config file when
+no daemon is running. `add`, `status`, and `restart` fail on an unavailable
+socket even if a config exists. See [missing daemon or config](configuration.md#missing-daemon-or-config).

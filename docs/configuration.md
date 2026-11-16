@@ -2,7 +2,9 @@
 
 The daemon reads `/etc/docktinel/config.json` if present. Select another file with
 `daemon --config PATH` or `DOCKTINEL_CONFIG`. A file selected by flag or ENV is
-required; the absent default file is allowed for CLI-only setups. Any existing
+required. An absent default file is allowed only when you explicitly start
+`docktinel daemon` for a CLI-only setup. Automatic startup requires an existing
+config file, including when using the default path. Any existing
 file that cannot be read, parsed or validated fails startup. Duplicate object
 members, unknown fields, trailing JSON and duplicate task names are errors.
 Maximum file size is 1 MiB. The file is read once, before the API accepts tasks;
@@ -52,8 +54,10 @@ must remain unique; registration closes when startup begins.
 | `DOCKTINEL_STARTUP_TIMEOUT` | `2m` | Shared startup and after-start budget |
 
 Explicit CLI flags override ENV, which overrides defaults. `--config` belongs
-to `daemon`. Set the same runtime directory for all CLI invocations and Docker
-healthcheck. Start the daemon explicitly before calling `add` or `startup`. `startup --timeout` overrides the timeout ENV setting. Startup and after-start readiness share the same deadline; attaching the main process does not reset it.
+to `daemon`; an automatically launched daemon inherits `DOCKTINEL_CONFIG`.
+`--timeout` belongs to `startup` and its `exec` alias. Set the same runtime
+directory for all commands and Docker healthcheck. A non-root runtime directory
+must be writable by the container user.
 
 ## ENV substitution
 
@@ -73,3 +77,66 @@ and newlines from ENV remain inside their original string; they cannot inject
 JSON properties or split a command argument. Numeric/boolean config properties
 remain JSON numbers/booleans: substitution does not convert their types.
 
+## Missing daemon or config
+
+| Command | Daemon running | Daemon absent |
+| --- | --- | --- |
+| `startup` / `exec` | Use registered tasks; no file required | Auto-start only with an existing config; otherwise error |
+| `add`, `status`, `restart` | Connect to daemon | Error, even if a config exists; never auto-start |
+| `healthcheck` | Evaluate independent status snapshot | Report failure; never auto-start |
+| `daemon` | Refuse a second instance | Explicitly start; absent default config is allowed |
+| `help`, `version` | Local operation | Local operation |
+
+For a setup without a config, start the daemon explicitly and register tasks:
+
+```sh
+#!/bin/sh
+set -eu
+
+docktinel daemon &
+docktinel add check dns --phase both -- /opt/bin/check-dns
+exec docktinel startup --timeout 30s -- application --foreground
+```
+
+No config file is needed in this flow. Once started, the daemon owns its task
+registrations; clients do not need to reread a config. In contrast, a direct
+`docktinel startup` or `docktinel exec -- application` with no daemon and no
+config fails without launching an application or background daemon. A valid
+empty config (`{"tasks":[]}`) is still an explicit configuration and is allowed.
+
+Help/version are intentionally independent of daemon availability. Healthcheck
+retains its independent watchdog behavior: a dead/stuck daemon is reported as
+unhealthy and may cause application termination according to its existing
+TERM/KILL policy; it never attempts to repair this by starting a daemon.
+
+## One-command Docker entrypoint
+
+```dockerfile
+COPY docktinel.json /etc/docktinel/config.json
+ENV DOCKTINEL_STARTUP_TIMEOUT=30s
+ENTRYPOINT ["docktinel", "startup", "--"]
+CMD ["application", "--foreground"]
+```
+
+Run the container with `--init` / Compose `init: true` and a restart policy.
+Startup connects to a running daemon or starts one if absent **only with an
+existing config file**, then waits for startup checks and replaces itself with
+the application. The auto-started daemon treats that path as required: if the
+file disappears before it is read, startup fails rather than launching with
+no tasks. Automatic startup accepts regular files, including symlinks to
+regular files. After-start checks run
+in the background within the remaining budget. No shell entrypoint is required.
+
+A shell-based setup can select a different config explicitly:
+
+```sh
+docktinel daemon --config /custom/config.json &
+# Optional additional registrations here.
+exec docktinel startup --timeout 30s -- application --foreground
+```
+
+Without a command, `docktinel startup` performs startup checks and returns.
+The daemon awaits main attachment within the same startup budget. A subsequent
+`exec docktinel startup -- application` or `exec docktinel exec -- application`
+attaches without repeating checks or resetting that deadline. Both spellings
+have identical behavior.

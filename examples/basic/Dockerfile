@@ -10,10 +10,10 @@ FROM alpine:3.22
 COPY --from=sentinel /usr/local/bin/docktinel /usr/local/bin/docktinel
 COPY --from=demo-build /out/demo /usr/local/bin/demo
 WORKDIR /srv
-COPY entrypoint.sh /opt/demo/entrypoint.sh
-RUN chmod +x /opt/demo/entrypoint.sh
-ENV TINI_KILL_PROCESS_GROUP=1
+COPY config.json /etc/docktinel/config.json
+ENV TINI_KILL_PROCESS_GROUP=1 DOCKTINEL_STARTUP_TIMEOUT=30s DEMO_MESSAGE="Hello from Docktinel!"
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
     CMD ["docktinel", "healthcheck", "--startup-grace", "30s"]
-ENTRYPOINT ["/opt/demo/entrypoint.sh"]
+ENTRYPOINT ["docktinel", "startup", "--"]
+CMD ["demo", "serve"]

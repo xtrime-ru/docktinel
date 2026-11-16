@@ -22,6 +22,7 @@ type Config struct {
 	RegistrationTimeout time.Duration
 	ConfigPath          string
 	ConfigRequired      bool
+	MainPID             int
 	StopGrace           time.Duration
 }
 
@@ -52,7 +53,11 @@ func newDaemon(cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	main, err := processIdentity(os.Getppid())
+	mainPID := cfg.MainPID
+	if mainPID == 0 {
+		mainPID = os.Getppid()
+	}
+	main, err := processIdentity(mainPID)
 	if err != nil {
 		return nil, err
 	}

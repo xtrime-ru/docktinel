@@ -10,15 +10,21 @@ Global flags come before the command. Flags for `add` come after the task kind a
 
 | Command | Options and defaults |
 | --- | --- |
-| `daemon` | `--heartbeat 5s`, `--stop-grace 10s` |
-| `startup` | `--timeout 2m` (shared startup and after-start budget) |
-| `exec -- COMMAND ARGS...` | Register and replace the entrypoint process |
+| `daemon` | `--config PATH`, `--heartbeat 5s`, `--stop-grace 10s` |
+| `startup` | `--timeout 2m`, optional `-- COMMAND ARGS...` |
+| `exec -- COMMAND ARGS...` | Full alias for `startup`, with identical flags and behavior |
 | `restart --reason TEXT` | Cancel work, run shutdown jobs, terminate the application |
 | `status` | `--json` for machine-readable output |
 | `healthcheck` | `--max-age 30s`, `--stop-grace 10s`, `--startup-grace 2m`, `--no-kill` |
 | `version` | Build version |
 
-`daemon` stays in the foreground; start it with `&` in an entrypoint. Minimum heartbeat is 100ms. Registration has a one-minute budget. `startup --timeout` sets one shared deadline for startup tasks, waiting for main attachment, and after-start readiness. The default is two minutes; `DOCKTINEL_STARTUP_TIMEOUT` overrides the default and an explicit CLI flag overrides ENV.
+`daemon` stays in the foreground; start it with `&` in a shell entrypoint, or let `startup` launch it automatically when a config file exists. Explicit daemon startup loads the optional default config `/etc/docktinel/config.json`. `--config PATH` or `DOCKTINEL_CONFIG` selects a required file. See [configuration and ENV](configuration.md).
+
+The daemon allows one minute to request startup. `startup --timeout` then sets a new, shared budget for startup tasks, waiting for main attachment, and after-start readiness. It is enforced by the daemon even if the client disconnects. `DOCKTINEL_STARTUP_TIMEOUT` supplies the default budget; an explicit CLI flag takes precedence. Minimum heartbeat is 100ms.
+
+`startup` without a command runs checks and returns, leaving the daemon awaiting main attachment. A later `startup -- COMMAND` or `exec -- COMMAND` reuses that startup's deadline. Supplying a command on the first invocation performs both operations. Use `exec docktinel startup -- COMMAND` inside a shell entrypoint to preserve the main PID. With Docker array-form `ENTRYPOINT`, no outer `exec` is needed. If no daemon is running, startup requires an existing config file to launch one; without a daemon and config, both `startup` and `exec` fail without starting an application or daemon. If a daemon is already running, both commands work without a config. If its lock is held but the API is unresponsive, they fail without starting another daemon.
+
+`add`, `status`, and `restart` require a running daemon and never auto-start it, regardless of whether a config exists. They return a nonzero exit code if connection establishment fails within their five-second client deadline. The bounded connection retry also allows `add` to race an explicitly started `daemon &`. `healthcheck` is independent of the API, never starts a daemon, and returns nonzero when the daemon is missing. `help` and `version` do not require a daemon. `daemon` is the explicit start command; it may be used without a default config to register tasks through `add`.
 
 The daemon's stop grace is the budget for shutdown jobs together, followed by a separate application TERM grace of the same duration. Task cancellation may take another two seconds. Choose Docker's `stop_grace_period` to match your shutdown requirements. Docker healthcheck escalation has its own grace and runs across invocations, without blocking a single probe.
 

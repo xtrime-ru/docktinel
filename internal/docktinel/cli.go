@@ -20,15 +20,17 @@ Usage: docktinel [--runtime-dir DIR] COMMAND
 
   daemon       Run the daemon in the foreground (start with & in entrypoint)
   add          Register a check, job, or process before startup
-  startup      Run startup tasks and wait for the result
-  exec         Register this entrypoint PID and replace it with the application
+  startup      Connect or auto-start with config, run checks, optionally exec application
+  exec         Alias for startup
   restart      Request an orderly container restart with --reason TEXT
   status       Query the daemon state (--json for machine-readable output)
   healthcheck  Report health; stop the application if the watchdog is stuck
   version      Show build version
 
 Use COMMAND --help for command options. Runtime directory defaults to
-DOCKTINEL_RUNTIME_DIR or /run/docktinel. Requires Linux and Docker --init.
+DOCKTINEL_RUNTIME_DIR or /run/docktinel. Only startup/exec auto-start a daemon,
+and require a config for that. Without a config, start daemon explicitly and
+register tasks with add. Requires Linux and Docker --init.
 `
 
 func splitFields(s string) []string { return strings.Fields(s) }
@@ -72,20 +74,22 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		fmt.Fprintln(out, version)
 		return nil
 	case "daemon":
-		config := f.String("config", "", "config file (DOCKTINEL_CONFIG or /etc/docktinel/config.json)")
 		heartbeat := f.Duration("heartbeat", 5*time.Second, "state publication interval")
+		config := f.String("config", "", "config file (DOCKTINEL_CONFIG or /etc/docktinel/config.json)")
+		mainPID := f.Int("main-pid", 0, "entrypoint PID (internal auto-start option)")
 		grace := f.Duration("stop-grace", 10*time.Second, "shutdown hook budget and application termination grace")
 		if err := parse(f, args); err != nil {
 			return err
 		}
 		path, required := configPath(*config)
-		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, RegistrationTimeout: time.Minute, StopGrace: *grace, ConfigPath: path, ConfigRequired: required})
+		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, RegistrationTimeout: time.Minute,
+			StopGrace: *grace, ConfigPath: path, ConfigRequired: required, MainPID: *mainPID})
 	case "add":
 		return addCLI(args, dir, stderr)
-	case "startup":
+	case "startup", "exec":
 		// Parse CLI before ENV so an explicit flag also overrides invalid ENV.
 		timeout := f.Duration("timeout", 2*time.Minute, "overall startup and after-start readiness budget")
-		if err := parse(f, args); err != nil {
+		if err := f.Parse(args); err != nil {
 			return err
 		}
 		explicit := false
@@ -104,18 +108,36 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		if *timeout <= 0 {
 			return errors.New("timeout must be positive")
 		}
-		return callAPI(dir, "POST", "/v1/startup", startupRequest{Timeout: *timeout}, nil, *timeout+5*time.Second)
-	case "exec":
-		if err := f.Parse(args); err != nil {
-			return err
-		}
 		argv := f.Args()
-		if len(argv) == 0 {
-			return errors.New("use exec docktinel exec -- COMMAND [ARGS...]")
+		var path string
+		var err error
+		mainPID := os.Getppid()
+		if mainPID == 1 {
+			mainPID = os.Getpid()
 		}
-		path, err := exec.LookPath(argv[0])
-		if err != nil {
+		if len(argv) > 0 {
+			path, err = exec.LookPath(argv[0])
+			if err != nil {
+				return err
+			}
+			mainPID = os.Getpid()
+		}
+		if err := ensureDaemon(dir, mainPID); err != nil {
 			return err
+		}
+		var state Status
+		if err := callAPI(dir, "GET", "/v1/status", nil, &state, 5*time.Second); err != nil {
+			return err
+		}
+		// A check-only startup may be followed by startup/exec with a command.
+		// Reuse its original deadline; never reset the budget on attachment.
+		if state.Phase != "awaiting-main" || len(argv) == 0 {
+			if err := callAPI(dir, "POST", "/v1/startup", startupRequest{Timeout: *timeout}, nil, *timeout+5*time.Second); err != nil {
+				return err
+			}
+		}
+		if len(argv) == 0 {
+			return nil
 		}
 		p, err := processIdentity(os.Getpid())
 		if err != nil {

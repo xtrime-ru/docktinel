@@ -136,9 +136,9 @@ func TestGlobalStartupBudgetBoundsOptionalTask(t *testing.T) {
 	}
 }
 
-func TestStartupHelpAndInvalidENV(t *testing.T) {
+func TestStartupAliasHelpAndInvalidENV(t *testing.T) {
 	t.Setenv("DOCKTINEL_STARTUP_TIMEOUT", "invalid")
-	for _, name := range []string{"startup"} {
+	for _, name := range []string{"startup", "exec"} {
 		var out, stderr bytes.Buffer
 		if CLI([]string{name, "--help"}, &out, &stderr, "test") != 0 {
 			t.Fatal(stderr.String())

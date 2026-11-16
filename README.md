@@ -1,6 +1,6 @@
 # Docktinel
 
-A lightweight sentinel for Docker containers: startup checks, background jobs, process supervision, and a watchdog-aware Docker healthcheck. Written in Go, with no external dependencies and optional JSON configuration.
+A lightweight sentinel for Docker containers: startup checks, background jobs, process supervision, and a watchdog-aware Docker healthcheck. Written in Go, with no external runtime dependencies. Configure tasks with JSON or CLI commands.
 
 Docktinel coordinates work **inside one container**. Keep Docker's init (`--init` or Compose `init: true`) for signal forwarding and zombie reaping, and use Docker's restart policy to bring the container back.
 
@@ -12,33 +12,57 @@ Copy the static binary from the artifact image into your application's image:
 FROM ghcr.io/xtrime-ru/docktinel:edge AS sentinel
 FROM alpine:3.22
 COPY --from=sentinel /usr/local/bin/docktinel /usr/local/bin/docktinel
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-ENV TINI_KILL_PROCESS_GROUP=1
-HEALTHCHECK --interval=10s --timeout=5s --start-period=2m --retries=3 \
+COPY docktinel.json /etc/docktinel/config.json
+ENV TINI_KILL_PROCESS_GROUP=1 DOCKTINEL_STARTUP_TIMEOUT=30s
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
   CMD ["docktinel", "healthcheck"]
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["docktinel", "startup", "--"]
 CMD ["your-application", "--foreground"]
 ```
 
-`entrypoint.sh`:
+`docktinel.json`:
+
+```json
+{
+  "tasks": [
+    {
+      "kind": "check",
+      "name": "dependency",
+      "phase": "both",
+      "command": ["/usr/local/bin/check-dependency", "${DEPENDENCY_HOST}"],
+      "timeout": "5s",
+      "interval": "${CHECK_INTERVAL:-5s}"
+    },
+    {
+      "kind": "job",
+      "name": "refresh",
+      "command": ["/usr/local/bin/refresh-state"],
+      "interval": "1m",
+      "timeout": "20s"
+    }
+  ]
+}
+```
+
+Set `DEPENDENCY_HOST` in your container environment. `startup` starts the daemon if absent **only when a config file exists**, waits for startup checks, then replaces itself with the application. No shell entrypoint is needed. `exec` is a full alias for `startup`.
+
+For an existing shell entrypoint, register tasks imperatively instead:
 
 ```sh
 #!/bin/sh
 set -eu
 
 docktinel daemon &
-
-# Existing commands/scripts define what ready and healthy mean.
 docktinel add check dependency --phase both --deadline 1m \
     --timeout 5s --interval 5s -- /usr/local/bin/check-dependency
-
 docktinel add job refresh --interval 1m --timeout 20s \
     -- /usr/local/bin/refresh-state
-
-docktinel startup --timeout 2m
-exec docktinel exec -- "$@"
+exec docktinel startup --timeout 2m -- "$@"
 ```
+
+An existing config loads before CLI registrations; task names must be unique across both. See [configuration and ENV](docs/configuration.md) for defaults and substitution rules.
+
+Without a config, use the explicit `daemon &` → `add` → `startup`/`exec` flow above. Once the daemon is running, startup does not require a config file. Only `startup` and its `exec` alias may auto-start a daemon, and only with a config. `add`, `status`, and `restart` fail if the daemon is unavailable, even when a config exists. `healthcheck` never starts a daemon and reports failure when it is missing; it continues to use the independent state file. `help` and `version` remain local commands.
 
 The application and helper commands above are placeholders for your image. For a complete runnable HTTP example:
 
@@ -52,17 +76,17 @@ curl http://127.0.0.1:8080
 
 See [the demo](examples/basic/README.md), [DNS/AdGuard integration](examples/adguard/README.md), and the [command reference](docs/commands.md).
 
-See [configuration and ENV](docs/configuration.md) for registering tasks from a file.
-
 ## Lifecycle
 
-1. The entrypoint starts `docktinel daemon &`, then registers tasks with `add`.
-2. `startup` closes registration and runs startup tasks in registration order, waiting for their result. Failed commands retry up to their deadline.
-3. `exec docktinel exec -- ...` registers the entrypoint's PID and replaces it with the application. The outer shell `exec` is required.
-4. After-start tasks verify the running application. Once they finish, runtime checks and jobs begin. Processes started during startup remain supervised.
+1. `startup` connects to the daemon. If absent, it starts one only when `/etc/docktinel/config.json` (or `DOCKTINEL_CONFIG`) exists and can be loaded. Without both daemon and config, startup fails. For a setup without config, explicitly start `daemon &` and register tasks with `add` first.
+2. `startup --timeout 30s` closes registration, starts the overall startup budget, and runs startup tasks in registration order. Failed commands retry up to their task deadline or the remaining overall budget.
+3. With a command after `--`, startup registers its PID and replaces itself with the application. The outer shell `exec` is required when invoked from a shell entrypoint; Docker's array-form `ENTRYPOINT` needs no wrapper.
+4. After-start tasks verify the running application using the same remaining startup budget. Then runtime checks and jobs begin. Processes started during startup remain supervised.
 5. A critical failure cancels background work, runs shutdown jobs, then sends TERM to the application, escalating to KILL after the grace period. The application exits, Docker's init exits, and Docker applies its restart policy.
 
-`exec` is a thin wrapper around the system `exec` call. Docktinel does not become PID 1, forward application signals, or implement an init. Main application stdout, stderr, signals and exit code retain Docker's normal behavior.
+The daemon allows one minute for initial configuration/registration before `startup` is requested. `startup` without an application runs only startup checks and leaves the daemon awaiting the main process. A subsequent `startup -- COMMAND` (or `exec -- COMMAND`) attaches without resetting the budget.
+
+Application launch uses the system `exec` call. Docktinel does not become PID 1, forward application signals, or implement an init. Main application stdout, stderr, signals and exit code retain Docker's normal behavior. A hung daemon is reported as unavailable and never replaced with a second instance.
 
 ## Health and recovery
 

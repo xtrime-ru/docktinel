@@ -25,8 +25,7 @@ docktinel add check dns-serving --interval 5s --timeout 5s --failures 3 \
 docktinel add job dns-refresh --interval 30s --timeout 10s --lock dns-state \
     -- /opt/bin/update-dns-endpoints
 
-docktinel startup --timeout 2m
-exec docktinel exec -- /opt/AdGuardHome/AdGuardHome --no-check-update \
+exec docktinel startup --timeout 2m -- /opt/AdGuardHome/AdGuardHome --no-check-update \
     -c /opt/adguardhome/conf/AdGuardHome.yaml -w /opt/adguardhome/work
 ```
 
