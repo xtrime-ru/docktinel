@@ -50,3 +50,5 @@ HTTP API clients never auto-start a daemon. The CLI only provides automatic
 startup through `startup` / `exec`, and requires an existing config file when
 no daemon is running. `add`, `status`, and `restart` fail on an unavailable
 socket even if a config exists. See [missing daemon or config](configuration.md#missing-daemon-or-config).
+
+Check tasks accept `successes` (default `1` when omitted). Status includes the current `successes` streak and `required_successes` for checks. While awaiting confirmation, task state is `confirming` and runtime container health is degraded.

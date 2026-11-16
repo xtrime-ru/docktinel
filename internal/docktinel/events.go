@@ -13,7 +13,7 @@ func (d *Daemon) lifecycleLocked() lifecycleState {
 	if s.phase == "runtime" {
 		s.state = "healthy"
 		for _, task := range d.states {
-			if task.Failures > 0 {
+			if health := taskHealth(task); health == "degraded" || health == "confirming" {
 				s.state = "degraded"
 				break
 			}
@@ -40,6 +40,9 @@ func taskHealth(s TaskStatus) string {
 	if s.Failures > 0 {
 		return "degraded"
 	}
+	if s.State == "confirming" {
+		return "confirming"
+	}
 	if s.State == "healthy" {
 		return "healthy"
 	}
@@ -58,7 +61,7 @@ func logTaskTransition(before, after TaskStatus, phase string) {
 		return
 	}
 	message := "task state changed"
-	if from == "degraded" && to == "healthy" {
+	if (from == "degraded" || before.Reason != "") && to == "healthy" {
 		message = "task recovered"
 	}
 	attrs := []any{"event", "task_state_changed", "task", after.Name, "kind", after.Kind,

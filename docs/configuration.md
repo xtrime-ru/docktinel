@@ -19,7 +19,8 @@ there is no automatic reload.
       "phase": "both",
       "command": ["/opt/bin/check-dns", "${DNS_SERVER}"],
       "timeout": "${DNS_TIMEOUT:-5s}",
-      "interval": "5s"
+      "interval": "5s",
+      "successes": 2
     },
     {
       "kind": "job",
@@ -32,7 +33,7 @@ there is no automatic reload.
 ```
 
 Task properties match `add` options: `kind`, `name`, `phase`, `command`, `interval`,
-`timeout`, `deadline`, `grace`, `failures`, `failure`, `on_exit`, and `lock`.
+`timeout`, `deadline`, `grace`, `failures`, `successes`, `failure`, `on_exit`, and `lock`.
 `kind`, `name`, and a nonempty `command` are required. Omitted options use the
 same [defaults as the CLI](commands.md). Durations are strings such as `500ms`,
 `5s`, `1m`, or `0s`; numeric durations are not accepted in config files. The local

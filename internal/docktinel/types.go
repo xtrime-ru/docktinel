@@ -20,25 +20,26 @@ var taskName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
 // Task is registered over the local socket. Commands are argv, never implicit shell.
 type Task struct {
-	Name     string        `json:"name"`
-	Kind     string        `json:"kind"`
-	Phase    string        `json:"phase"`
-	Command  []string      `json:"command"`
-	Env      []string      `json:"env"`
-	Dir      string        `json:"dir"`
-	Interval time.Duration `json:"interval"`
-	Timeout  time.Duration `json:"timeout"`
-	Deadline time.Duration `json:"deadline"`
-	Grace    time.Duration `json:"grace"`
-	Failures int           `json:"failures"`
-	Failure  string        `json:"failure"`
-	OnExit   string        `json:"on_exit"`
-	Lock     string        `json:"lock,omitempty"`
+	Name      string        `json:"name"`
+	Kind      string        `json:"kind"`
+	Phase     string        `json:"phase"`
+	Command   []string      `json:"command"`
+	Env       []string      `json:"env"`
+	Dir       string        `json:"dir"`
+	Interval  time.Duration `json:"interval"`
+	Timeout   time.Duration `json:"timeout"`
+	Deadline  time.Duration `json:"deadline"`
+	Grace     time.Duration `json:"grace"`
+	Failures  int           `json:"failures"`
+	Successes int           `json:"successes"`
+	Failure   string        `json:"failure"`
+	OnExit    string        `json:"on_exit"`
+	Lock      string        `json:"lock,omitempty"`
 }
 
 func taskDefaults(kind, name string) Task {
 	t := Task{Name: name, Kind: kind, Phase: "runtime", Timeout: time.Minute, Deadline: time.Minute,
-		Failures: 3, Failure: "degrade", OnExit: "restart"}
+		Failures: 3, Successes: 1, Failure: "degrade", OnExit: "restart"}
 	switch kind {
 	case "check":
 		t.Interval, t.Timeout, t.Failure = 10*time.Second, 5*time.Second, "restart-container"
@@ -84,6 +85,9 @@ func (t Task) Validate() error {
 	if t.Failures < 1 {
 		return errors.New("failures must be positive")
 	}
+	if t.Successes < 1 || (t.Kind != "check" && t.Successes != 1) {
+		return errors.New("successes must be positive; only checks support values above one")
+	}
 	if t.Failure != "degrade" && t.Failure != "restart-container" {
 		return errors.New("failure must be degrade or restart-container")
 	}
@@ -105,17 +109,19 @@ type Identity struct {
 }
 
 type TaskStatus struct {
-	health        string    // Last logical health, independent of transient execution state.
-	Name          string    `json:"name"`
-	Kind          string    `json:"kind"`
-	State         string    `json:"state"`
-	Reason        string    `json:"reason,omitempty"`
-	Failures      int       `json:"failures"`
-	LastStarted   float64   `json:"last_started,omitzero"`
-	LastCompleted float64   `json:"last_completed,omitzero"`
-	Due           float64   `json:"due,omitzero"`
-	Critical      bool      `json:"critical"`
-	Process       *Identity `json:"process,omitempty"`
+	health            string    // Last logical health, independent of transient execution state.
+	Name              string    `json:"name"`
+	Kind              string    `json:"kind"`
+	State             string    `json:"state"`
+	Reason            string    `json:"reason,omitempty"`
+	Failures          int       `json:"failures"`
+	Successes         int       `json:"successes,omitzero"`
+	RequiredSuccesses int       `json:"required_successes,omitzero"`
+	LastStarted       float64   `json:"last_started,omitzero"`
+	LastCompleted     float64   `json:"last_completed,omitzero"`
+	Due               float64   `json:"due,omitzero"`
+	Critical          bool      `json:"critical"`
+	Process           *Identity `json:"process,omitempty"`
 }
 
 type Status struct {

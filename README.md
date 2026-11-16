@@ -92,7 +92,7 @@ Application launch uses the system `exec` call. Docktinel does not become PID 1,
 
 ## Health and recovery
 
-Checks return zero on success and nonzero on failure. Runtime critical checks tolerate three consecutive failures by default; success resets the counter. `--failure degrade` records the failure without stopping the application. A later success restores the healthy state.
+Checks return zero on success and nonzero on failure. Runtime critical checks tolerate three consecutive failures by default; success resets the counter. `--failure degrade` records the failure without stopping the application. A later success restores the healthy state. Checks can require a streak with `--successes N` (JSON `successes`, default `1`); the same threshold gates startup readiness and runtime recovery. Lifecycle changes and confirmed task recovery are logged as structured events.
 
 Jobs run once or periodically, never overlapping with themselves. Failed jobs retry with delays of 10, 20, 30, 40, 50, then 60 seconds. Related jobs can share `--lock NAME`. Long-running helper processes restart after exit, or can trigger a container restart with `--on-exit restart-container`.
 

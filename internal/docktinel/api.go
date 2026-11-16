@@ -20,7 +20,7 @@ func (d *Daemon) controlServer() *http.Server {
 		writeAPI(w, http.StatusOK, d.snapshot())
 	})
 	mux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
-		var task Task
+		task := Task{Successes: 1}
 		if !decodeAPI(w, r, &task) {
 			return
 		}

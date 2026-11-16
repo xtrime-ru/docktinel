@@ -125,7 +125,11 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		now, _ := uptime()
 		fmt.Fprintf(out, "%s (%s), snapshot age %.1fs\n", s.State, s.Phase, now-s.Heartbeat)
 		for _, task := range s.Tasks {
-			fmt.Fprintf(out, "%-24s %-8s %-10s %s\n", task.Name, task.Kind, task.State, task.Reason)
+			reason := task.Reason
+			if task.RequiredSuccesses > 1 {
+				reason = fmt.Sprintf("%d/%d successes %s", task.Successes, task.RequiredSuccesses, reason)
+			}
+			fmt.Fprintf(out, "%-24s %-8s %-10s %s\n", task.Name, task.Kind, task.State, strings.TrimSpace(reason))
 		}
 		return nil
 	case "healthcheck":
@@ -172,6 +176,7 @@ func addCLI(args []string, dir string, out io.Writer) error {
 	f.DurationVar(&t.Deadline, "deadline", t.Deadline, "overall retry budget for startup and after-start tasks")
 	f.DurationVar(&t.Grace, "grace", t.Grace, "delay before first runtime execution")
 	f.IntVar(&t.Failures, "failures", t.Failures, "consecutive failures before restarting the container")
+	f.IntVar(&t.Successes, "successes", t.Successes, "consecutive successful checks required for readiness or recovery")
 	f.StringVar(&t.Failure, "failure", t.Failure, "degrade or restart-container")
 	f.StringVar(&t.OnExit, "on-exit", t.OnExit, "process action: restart or restart-container")
 	f.StringVar(&t.Lock, "lock", t.Lock, "serialize commands sharing this lock name (not checks)")

@@ -28,22 +28,7 @@ func (d *Daemon) runPhase(phase string, tasks []Task) error {
 			d.launch(task)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(phaseCtx, task.Deadline)
-		var err error
-		for {
-			err = d.attempt(ctx, task)
-			if err == nil || ctx.Err() != nil {
-				break
-			}
-			pause := task.Interval
-			if pause == 0 {
-				pause = time.Second
-			}
-			if !delay(ctx, pause) {
-				break
-			}
-		}
-		cancel()
+		err := d.runStartupTask(phaseCtx, task)
 		if phaseCtx.Err() != nil {
 			return phaseCtx.Err()
 		}
@@ -55,6 +40,28 @@ func (d *Daemon) runPhase(phase string, tasks []Task) error {
 		}
 	}
 	return phaseCtx.Err()
+}
+
+// Startup and after-start tasks share retry semantics and a per-task deadline.
+func (d *Daemon) runStartupTask(parent context.Context, task Task) error {
+	ctx, cancel := context.WithTimeout(parent, task.Deadline)
+	defer cancel()
+	pause := task.Interval
+	if pause == 0 {
+		pause = time.Second
+	}
+	for {
+		err := d.attempt(ctx, task)
+		if err == nil && (task.Kind != "check" || d.checkConfirmed(task)) {
+			return nil
+		}
+		if ctx.Err() != nil || !delay(ctx, pause) {
+			if err != nil {
+				return err
+			}
+			return ctx.Err()
+		}
+	}
 }
 
 func (d *Daemon) update(name string, fn func(*TaskStatus)) {
@@ -114,9 +121,23 @@ func (d *Daemon) attempt(parent context.Context, task Task) (err error) {
 		now, _ := uptime()
 		d.update(task.Name, func(s *TaskStatus) {
 			s.LastCompleted, s.Process, s.Due = now, nil, 0
-			if err == nil {
-				s.State, s.Reason, s.Failures = "healthy", "", 0
+			if err != nil {
+				s.Successes = 0
+				return
 			}
+			// Any success breaks the failure streak, but recovery requires N
+			// consecutive successes. Keep the previous reason until confirmed.
+			s.Failures = 0
+			if task.Kind == "check" {
+				if s.Successes < task.Successes {
+					s.Successes++
+				}
+				if s.Successes < task.Successes {
+					s.State = "confirming"
+					return
+				}
+			}
+			s.State, s.Reason = "healthy", ""
 		})
 	}()
 	if task.Lock != "" {
@@ -135,6 +156,7 @@ func (d *Daemon) markFailure(task Task, err error) int {
 	count := 0
 	d.update(task.Name, func(s *TaskStatus) {
 		s.Failures++
+		s.Successes = 0
 		count = s.Failures
 		s.State = "degraded"
 		s.Reason = err.Error()
@@ -188,4 +210,10 @@ func (d *Daemon) runTask(task Task) {
 			return
 		}
 	}
+}
+
+func (d *Daemon) checkConfirmed(task Task) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.states[task.Name].Successes >= task.Successes
 }

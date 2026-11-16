@@ -49,6 +49,7 @@ Names must be unique, 1–64 characters, starting with a letter or digit, follow
 | `--deadline` | `1m` | `1m` | Not used |
 | `--grace` | `0` | `0` | `0` |
 | `--failures` | `3` | `3` | Not used |
+| `--successes` | `1` | Must remain `1` | Must remain `1` |
 | `--failure` | `restart-container` | `degrade` | Use `--on-exit` |
 | `--on-exit` | Not used | Not used | `restart` |
 | `--lock NAME` | Not allowed | Optional | Optional |
@@ -91,6 +92,26 @@ docktinel add job cleanup --phase shutdown --timeout 5s -- /opt/bin/cleanup
 # A maintenance script requests a restart explicitly if reinitialization needs it.
 docktinel restart --reason 'DNS endpoints changed; reload unavailable'
 ```
+
+## Confirming readiness and recovery
+
+```sh
+docktinel add check dns --phase both --successes 2 --interval 5s -- /opt/bin/check-dns
+```
+
+Checks can require multiple consecutive successful attempts with `--successes N`
+(default `1`). The JSON config property is the integer `successes`. Startup and
+after-start wait for the complete streak within the existing task and global
+deadlines. Runtime checks stay degraded/confirming until the streak completes;
+this does not turn a runtime-only check into an application startup gate.
+
+Any failed attempt resets the success streak. Any successful attempt resets the
+consecutive failure counter, even while recovery is still being confirmed. The
+previous failure reason remains visible until confirmation. A check that already
+met the threshold stays confirmed on further successes until a failure occurs.
+`status --json` exposes `successes` and `required_successes`; text status shows
+progress for thresholds above one. Non-check tasks only accept the default `1`.
+Older API callers that omit `successes` also default to `1`.
 
 ## State transition logs
 

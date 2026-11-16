@@ -14,7 +14,7 @@ import (
 )
 
 func testTask(name, kind, command string) Task {
-	return Task{Name: name, Kind: kind, Phase: "runtime", Command: []string{"sh", "-c", command}, Env: os.Environ(), Interval: 100 * time.Millisecond, Timeout: time.Second, Deadline: 500 * time.Millisecond, Failures: 3, Failure: "degrade", OnExit: "restart"}
+	return Task{Name: name, Kind: kind, Phase: "runtime", Command: []string{"sh", "-c", command}, Env: os.Environ(), Interval: 100 * time.Millisecond, Timeout: time.Second, Deadline: 500 * time.Millisecond, Failures: 3, Successes: 1, Failure: "degrade", OnExit: "restart"}
 }
 
 func testDaemon(t *testing.T) *Daemon {

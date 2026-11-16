@@ -196,7 +196,11 @@ func (d *Daemon) add(task *Task) error {
 		return fmt.Errorf("task %q already exists", task.Name)
 	}
 	d.tasks = append(d.tasks, *task)
-	d.states[task.Name] = TaskStatus{Name: task.Name, Kind: task.Kind, State: "pending", Critical: task.critical()}
+	state := TaskStatus{Name: task.Name, Kind: task.Kind, State: "pending", Critical: task.critical()}
+	if task.Kind == "check" {
+		state.RequiredSuccesses = task.Successes
+	}
+	d.states[task.Name] = state
 	if task.Lock != "" {
 		if _, ok := d.locks[task.Lock]; !ok {
 			d.locks[task.Lock] = make(chan struct{}, 1)
