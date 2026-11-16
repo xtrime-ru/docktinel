@@ -2,7 +2,7 @@ name: Test and publish
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   release:
     types: [published]
   pull_request:
@@ -95,7 +95,7 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/master' }}
             type=semver,pattern={{version}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
             type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ steps.release.outputs.stable == 'true' }}
           flavor: latest=false
