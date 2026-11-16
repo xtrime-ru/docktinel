@@ -20,7 +20,7 @@ jobs:
           go-version: '1.27.4'
           cache: false
       - name: Check formatting
-        run: test -z "$(gofmt -l cmd internal)"
+        run: test -z "$(gofmt -l cmd internal integration examples/basic)"
       - run: go test -race -count=1 ./...
       - run: go vet ./...
       - name: Cross-compile static Linux binaries
@@ -42,10 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.4'
+          cache-dependency-path: integration/go.sum
       - uses: docker/setup-buildx-action@v4
-      - name: Build binary image and demo
-        run: make demo
-      - run: python3 tests/integration.py
+      - run: make integration
 
   publish:
     if: github.event_name == 'push'

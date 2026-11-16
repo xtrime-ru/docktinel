@@ -114,7 +114,7 @@ make test                               # race tests and go vet, on Linux
 make integration                        # build both images and exercise real containers
 ```
 
-Go 1.27+ is required for source builds. Docker builds use a pinned Go toolchain version. The supported runtime is Linux; process identity and heartbeat checks use `/proc`. No Go module dependencies are downloaded.
+Go 1.27+ is required for source builds. Docker builds use a pinned Go toolchain version. The supported runtime is Linux; process identity and heartbeat checks use `/proc`. The Docktinel binary has no external Go dependencies. Integration tests use the official Docker Go SDK in a separate module.
 
 The implementation uses Go 1.27’s stable `encoding/json/v2`, strict JSON validation, standard-library UUIDs, and typed generic state readers.
 

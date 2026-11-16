@@ -1,9 +1,16 @@
 ARG DOCKTINEL_IMAGE=docktinel:local
+ARG GO_VERSION=1.27.4
 FROM ${DOCKTINEL_IMAGE} AS sentinel
-FROM python:3.13-alpine
+FROM golang:${GO_VERSION}-bookworm AS demo-build
+WORKDIR /src
+COPY main.go ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/demo main.go
+
+FROM alpine:3.22
 COPY --from=sentinel /usr/local/bin/docktinel /usr/local/bin/docktinel
+COPY --from=demo-build /out/demo /usr/local/bin/demo
 WORKDIR /srv
-COPY entrypoint.sh check.py /opt/demo/
+COPY entrypoint.sh /opt/demo/entrypoint.sh
 RUN chmod +x /opt/demo/entrypoint.sh
 ENV TINI_KILL_PROCESS_GROUP=1
 EXPOSE 8080

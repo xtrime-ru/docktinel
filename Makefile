@@ -2,7 +2,7 @@ GO ?= go
 VERSION ?= dev
 IMAGE ?= docktinel:local
 
-.PHONY: build test image demo integration
+.PHONY: build test image demo integration integration-test
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags='-s -w -X main.version=$(VERSION)' -o bin/docktinel ./cmd/docktinel
 
@@ -17,4 +17,8 @@ demo: image
 	docker build --builder "$$(docker context show)" --build-arg DOCKTINEL_IMAGE=$(IMAGE) -t docktinel-demo:local examples/basic
 
 integration: demo
-	python3 tests/integration.py
+	$(MAKE) integration-test
+
+integration-test:
+	DOCKER_HOST="$${DOCKER_HOST:-$$(docker context inspect --format '{{.Endpoints.docker.Host}}')}" $(GO) -C integration test -race -count=1 -timeout=3m -v ./...
+	$(GO) -C integration vet ./...
