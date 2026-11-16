@@ -1,0 +1,333 @@
+package docktinel
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func testTask(name, kind, command string) Task {
+	return Task{Name: name, Kind: kind, Phase: "runtime", Command: []string{"sh", "-c", command}, Env: os.Environ(), Interval: 100 * time.Millisecond, Timeout: time.Second, Deadline: 500 * time.Millisecond, Failures: 3, Failure: "degrade", OnExit: "restart"}
+}
+
+func testDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	if _, err := uptime(); err != nil {
+		t.Skip("Linux integration test")
+	}
+	d, err := newDaemon(Config{Dir: t.TempDir(), Heartbeat: time.Second, StartupTimeout: time.Minute, StopGrace: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Never signal the test runner or the host application.
+	d.status.Main = Identity{}
+	t.Cleanup(func() {
+		d.stop("test cleanup", false)
+		select {
+		case <-d.done:
+		case <-time.After(5 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+	return d
+}
+
+func TestTaskValidation(t *testing.T) {
+	valid := testTask("dns", "check", "true")
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, edit := range map[string]func(*Task){
+		"name": func(v *Task) { v.Name = "../bad" }, "kind": func(v *Task) { v.Kind = "cron" },
+		"phase": func(v *Task) { v.Phase = "invalid" }, "command": func(v *Task) { v.Command = nil },
+		"timeout": func(v *Task) { v.Timeout = 0 }, "interval": func(v *Task) { v.Interval = 0 },
+		"failures": func(v *Task) { v.Failures = 0 }, "lock": func(v *Task) { v.Lock = "shared" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := valid
+			edit(&v)
+			if v.Validate() == nil {
+				t.Fatal("invalid task accepted")
+			}
+		})
+	}
+}
+
+func TestHealthEvaluation(t *testing.T) {
+	base := Status{Version: 1, Instance: "run", Container: "container", Heartbeat: 100, Phase: "runtime", State: "healthy"}
+	for _, tc := range []struct {
+		name      string
+		edit      func(*Status)
+		fatal     bool
+		unhealthy bool
+	}{
+		{"healthy", func(s *Status) {}, false, false},
+		{"degraded", func(s *Status) { s.State = "degraded" }, false, false},
+		{"stale", func(s *Status) { s.Heartbeat = 60 }, true, true},
+		{"future", func(s *Status) { s.Heartbeat = 200 }, true, true},
+		{"other-container", func(s *Status) { s.Container = "old" }, true, true},
+		{"starting", func(s *Status) { s.Phase = "startup"; s.StartupDeadline = 120 }, false, true},
+		{"startup-timeout", func(s *Status) { s.Phase = "startup"; s.StartupDeadline = 99 }, true, true},
+		{"stopping", func(s *Status) { s.Phase = "stopping"; s.StopDeadline = 120 }, false, true},
+		{"stop-timeout", func(s *Status) { s.Phase = "stopping"; s.StopDeadline = 99 }, true, true},
+		{"critical-overdue", func(s *Status) { s.Tasks = []TaskStatus{{Name: "dns", Critical: true, Due: 99}} }, true, true},
+		{"maintenance-overdue", func(s *Status) { s.Tasks = []TaskStatus{{Name: "update", Due: 99}} }, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base
+			tc.edit(&s)
+			fatal, reason := Evaluate(s, "container", 100, 30*time.Second)
+			if fatal != tc.fatal || (reason != "") != tc.unhealthy {
+				t.Fatalf("fatal=%v reason=%q", fatal, reason)
+			}
+		})
+	}
+}
+
+func TestRegistrationAndStartupRetry(t *testing.T) {
+	d := testDaemon(t)
+	marker := filepath.Join(t.TempDir(), "ready")
+	task := testTask("wait", "check", `if [ -e "$READY" ]; then exit 0; else touch "$READY"; exit 1; fi`)
+	task.Phase = "startup"
+	task.Env = append(task.Env, "READY="+marker)
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	if d.add(&task) == nil {
+		t.Fatal("duplicate task accepted")
+	}
+	if err := d.startup(); err != nil {
+		t.Fatal(err)
+	}
+	if d.snapshot().Phase != "awaiting-main" || d.snapshot().Tasks[0].State != "healthy" {
+		t.Fatal(d.snapshot())
+	}
+	task.Name = "late"
+	if d.add(&task) == nil {
+		t.Fatal("late registration accepted")
+	}
+	if d.startup() == nil {
+		t.Fatal("duplicate startup accepted")
+	}
+}
+
+func TestStartupDependencyCanDegrade(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("optional-dns", "check", "false")
+	task.Phase = "startup"
+	task.Deadline = 150 * time.Millisecond
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startup(); err != nil {
+		t.Fatal(err)
+	}
+	if d.snapshot().Tasks[0].State != "degraded" {
+		t.Fatal(d.snapshot())
+	}
+}
+
+func TestCriticalCheckStopsAfterThreshold(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("critical", "check", "false")
+	task.Failure = "restart-container"
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	d.launch(task)
+	select {
+	case <-d.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("critical failure did not stop daemon")
+	}
+	if got := d.snapshot().Tasks[0].Failures; got != 3 {
+		t.Fatalf("got %d failures", got)
+	}
+}
+
+func TestSuccessResetsConsecutiveFailures(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("check", "check", "true")
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	d.markFailure(task, os.ErrInvalid)
+	d.markFailure(task, os.ErrInvalid)
+	if err := d.attempt(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	if d.snapshot().Tasks[0].Failures != 0 {
+		t.Fatal("failure count was not reset")
+	}
+}
+
+func TestSharedLockSerializesJobs(t *testing.T) {
+	d := testDaemon(t)
+	root := t.TempDir()
+	for _, name := range []string{"one", "two", "three"} {
+		task := testTask(name, "job", `mkdir "$GUARD" || exit 1; sleep 0.05; rmdir "$GUARD"`)
+		task.Interval = 0
+		task.Lock = "shared"
+		task.Env = append(task.Env, "GUARD="+filepath.Join(root, "guard"))
+		if err := d.add(&task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, task := range d.tasks {
+		d.launch(task)
+	}
+	d.workers.Wait()
+	for _, task := range d.snapshot().Tasks {
+		if task.Failures != 0 || task.State != "healthy" {
+			t.Fatal(task)
+		}
+	}
+}
+
+func TestTimeoutKillsCommandGroup(t *testing.T) {
+	if _, err := uptime(); err != nil {
+		t.Skip("Linux test")
+	}
+	path := filepath.Join(t.TempDir(), "child")
+	task := testTask("timeout", "job", `trap '' TERM; sleep 30 & echo $! > "$CHILD"; wait`)
+	task.Env = append(task.Env, "CHILD="+path)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if execute(ctx, task, nil) == nil {
+		t.Fatal("timed-out command succeeded")
+	}
+	if time.Since(started) > 4*time.Second {
+		t.Fatal("command cancellation took too long")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SIGKILL is asynchronous: allow the kernel to schedule the child and
+	// complete its exit before inspecting /proc. Keep the assertion bounded.
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := processIdentity(pid); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background child survived timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestAtomicStateConcurrentReaders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "status.json")
+	if err := writeJSON(path, Status{Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for range 100 {
+				if _, err := readStatus(dir); err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+	}
+	for range 100 {
+		if err := writeJSON(path, Status{Version: 1, Instance: "new"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readers.Wait()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("state is readable by other users")
+	}
+}
+
+func TestExecRequiresEntrypointIdentity(t *testing.T) {
+	d := testDaemon(t)
+	d.status.Phase = "awaiting-main"
+	self, err := processIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.attach(&self) == nil {
+		t.Fatal("unrelated process can replace main identity")
+	}
+}
+
+func TestCommandHelpAndErrors(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"daemon", "--help"}, {"add", "--help"}, {"version"}} {
+		var out, err bytes.Buffer
+		if code := CLI(args, &out, &err, "test"); code != 0 {
+			t.Fatalf("%v: %s", args, err.String())
+		}
+	}
+	var out, err bytes.Buffer
+	if CLI([]string{"add", "check", "x", "--timeout", "0", "--", "true"}, &out, &err, "test") != 1 {
+		t.Fatal("invalid task accepted")
+	}
+}
+
+func TestStateDoesNotContainTaskSecrets(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("private", "job", "echo password")
+	task.Env = append(task.Env, "TOKEN=secret")
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(d.snapshot())
+	if strings.Contains(string(b), "secret") || strings.Contains(string(b), "password") {
+		t.Fatal("state leaked command or environment")
+	}
+}
+
+func TestLockTimeoutClearsExecutionDeadline(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("waiting", "job", "true")
+	task.Lock = "occupied"
+	task.Timeout = 20 * time.Millisecond
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	d.locks[task.Lock] <- struct{}{}
+	if err := d.attempt(context.Background(), task); err == nil {
+		t.Fatal("command acquired an occupied lock")
+	}
+	if state := d.snapshot().Tasks[0]; state.Due != 0 || state.LastCompleted == 0 {
+		t.Fatal("lock timeout left a stale execution deadline", state)
+	}
+}
+
+func TestTaskDeadlineAllowsNextPublication(t *testing.T) {
+	d := testDaemon(t)
+	d.cfg.Heartbeat = 10 * time.Second
+	task := testTask("fast", "check", "sleep 0.1")
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	d.launch(task)
+	// The initial deadline must not expire before the next state publication.
+	state := d.snapshot()
+	if state.Tasks[0].Due < state.Heartbeat+10 {
+		t.Fatal("deadline ignores publication interval", state)
+	}
+}

@@ -1,0 +1,250 @@
+package docktinel
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+)
+
+const Help = `Docktinel — a lightweight sentinel for Docker containers.
+
+Usage: docktinel [--runtime-dir DIR] COMMAND
+
+  daemon       Run the daemon in the foreground (start with & in entrypoint)
+  add          Register a check, job, or process before startup
+  startup      Run startup tasks and wait for the result
+  exec         Register this entrypoint PID and replace it with the application
+  restart      Request an orderly container restart with --reason TEXT
+  status       Read the latest snapshot (--json for machine-readable output)
+  healthcheck  Report health; stop the application if the watchdog is stuck
+  version      Show build version
+
+Use COMMAND --help for command options. Runtime directory defaults to
+DOCKTINEL_RUNTIME_DIR or /run/docktinel. Requires Linux and Docker --init.
+`
+
+func splitFields(s string) []string { return strings.Fields(s) }
+
+func CLI(args []string, out, stderr io.Writer, version string) int {
+	root := flag.NewFlagSet("docktinel", flag.ContinueOnError)
+	root.SetOutput(stderr)
+	defaultDir := os.Getenv("DOCKTINEL_RUNTIME_DIR")
+	if defaultDir == "" {
+		defaultDir = DefaultDir
+	}
+	dir := root.String("runtime-dir", defaultDir, "private runtime directory shared by daemon and clients")
+	if err := root.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(out, Help)
+			return 0
+		}
+		return 1
+	}
+	args = root.Args()
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Fprint(out, Help)
+		return 0
+	}
+	err := command(args[0], args[1:], *dir, out, stderr, version)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "docktinel:", err)
+		return 1
+	}
+	return 0
+}
+
+func command(name string, args []string, dir string, out, stderr io.Writer, version string) error {
+	f := flag.NewFlagSet("docktinel "+name, flag.ContinueOnError)
+	f.SetOutput(stderr)
+	switch name {
+	case "version":
+		fmt.Fprintln(out, version)
+		return nil
+	case "daemon":
+		heartbeat := f.Duration("heartbeat", 5*time.Second, "state publication interval")
+		startup := f.Duration("startup-timeout", 2*time.Minute, "overall deadline, including registration and after-start")
+		grace := f.Duration("stop-grace", 10*time.Second, "shutdown hook budget and application termination grace")
+		if err := parse(f, args); err != nil {
+			return err
+		}
+		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, StartupTimeout: *startup, StopGrace: *grace})
+	case "add":
+		return addCLI(args, dir, stderr)
+	case "startup":
+		timeout := f.Duration("timeout", 15*time.Minute, "maximum time for this client to wait; daemon keeps its own deadline")
+		if err := parse(f, args); err != nil {
+			return err
+		}
+		if *timeout <= 0 {
+			return errors.New("timeout must be positive")
+		}
+		return Call(dir, Request{Op: "startup"}, *timeout)
+	case "exec":
+		if err := f.Parse(args); err != nil {
+			return err
+		}
+		argv := f.Args()
+		if len(argv) == 0 {
+			return errors.New("use exec docktinel exec -- COMMAND [ARGS...]")
+		}
+		path, err := exec.LookPath(argv[0])
+		if err != nil {
+			return err
+		}
+		p, err := processIdentity(os.Getpid())
+		if err != nil {
+			return err
+		}
+		if err := Call(dir, Request{Op: "exec", Main: &p}, 5*time.Second); err != nil {
+			return err
+		}
+		return syscall.Exec(path, argv, os.Environ())
+	case "restart":
+		reason := f.String("reason", "", "required explanation for the planned restart")
+		if err := parse(f, args); err != nil {
+			return err
+		}
+		return Call(dir, Request{Op: "restart", Reason: *reason}, 5*time.Second)
+	case "status":
+		asJSON := f.Bool("json", false, "print JSON status")
+		if err := parse(f, args); err != nil {
+			return err
+		}
+		s, err := readStatus(dir)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			encoder := json.NewEncoder(out)
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(s)
+		}
+		now, _ := uptime()
+		fmt.Fprintf(out, "%s (%s), snapshot age %.1fs\n", s.State, s.Phase, now-s.Heartbeat)
+		for _, task := range s.Tasks {
+			fmt.Fprintf(out, "%-24s %-8s %-10s %s\n", task.Name, task.Kind, task.State, task.Reason)
+		}
+		return nil
+	case "healthcheck":
+		maxAge := f.Duration("max-age", 30*time.Second, "maximum heartbeat age")
+		grace := f.Duration("stop-grace", 10*time.Second, "time from emergency TERM to KILL across invocations")
+		missing := f.Duration("startup-grace", 2*time.Minute, "allow missing status during initial container startup")
+		noKill := f.Bool("no-kill", false, "diagnose without signalling the application")
+		if err := parse(f, args); err != nil {
+			return err
+		}
+		if *maxAge <= 0 || *grace <= 0 || *missing < 0 {
+			return errors.New("max-age and stop-grace must be positive; startup-grace must be nonnegative")
+		}
+		if err := Healthcheck(dir, *maxAge, *grace, *missing, *noKill); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "healthy")
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q; use docktinel --help", name)
+	}
+}
+
+func parse(f *flag.FlagSet, args []string) error {
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q", f.Arg(0))
+	}
+	return nil
+}
+
+func addCLI(args []string, dir string, stderr io.Writer) error {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(stderr, "Usage: docktinel add check|job|process NAME [OPTIONS] -- COMMAND [ARGS...]")
+		fmt.Fprintln(stderr, "Use add check NAME --help (or job/process) to see task options.")
+		return flag.ErrHelp
+	}
+	if len(args) < 2 {
+		return errors.New("usage: docktinel add check|job|process NAME [OPTIONS] -- COMMAND [ARGS...]")
+	}
+	t := Task{Kind: args[0], Name: args[1]}
+	f := flag.NewFlagSet("docktinel add "+t.Kind+" "+t.Name, flag.ContinueOnError)
+	f.SetOutput(stderr)
+	f.StringVar(&t.Phase, "phase", "runtime", "startup, after-start, runtime, shutdown, or both")
+	interval := time.Duration(0)
+	timeout := time.Minute
+	failure := "degrade"
+	if t.Kind == "check" {
+		interval = 10 * time.Second
+		timeout = 5 * time.Second
+		failure = "restart-container"
+	}
+	if t.Kind == "process" {
+		timeout = 0
+	}
+	f.DurationVar(&t.Interval, "interval", interval, "check interval or delay after job completion; zero is one-shot")
+	f.DurationVar(&t.Timeout, "timeout", timeout, "execution timeout; zero is allowed only for processes")
+	f.DurationVar(&t.Deadline, "deadline", time.Minute, "overall retry budget for startup and after-start tasks")
+	f.DurationVar(&t.Grace, "grace", 0, "delay before first runtime execution")
+	f.IntVar(&t.Failures, "failures", 3, "consecutive failures before restarting the container")
+	f.StringVar(&t.Failure, "failure", failure, "degrade or restart-container")
+	f.StringVar(&t.OnExit, "on-exit", "restart", "process action: restart or restart-container")
+	f.StringVar(&t.Lock, "lock", "", "serialize commands sharing this lock name (not checks)")
+	if err := f.Parse(args[2:]); err != nil {
+		return err
+	}
+	t.Command = f.Args()
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	t.Env = os.Environ()
+	var err error
+	t.Dir, err = os.Getwd()
+	if err != nil {
+		return err
+	}
+	return Call(dir, Request{Op: "add", Task: &t}, 5*time.Second)
+}
+
+func Call(dir string, request Request, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var conn net.Conn
+	var err error
+	// Bounded connection retry avoids a sleep between daemon & and the first add.
+	for time.Now().Before(deadline) {
+		conn, err = net.DialTimeout("unix", filepath.Join(dir, "control.sock"), 200*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err != nil {
+		return fmt.Errorf("connect to daemon: %w", err)
+	}
+	if conn == nil {
+		return errors.New("daemon connection deadline exceeded")
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(deadline)
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return err
+	}
+	var response Response
+	if err := json.NewDecoder(io.LimitReader(conn, 1<<20)).Decode(&response); err != nil {
+		return err
+	}
+	if response.Error != "" {
+		return errors.New(response.Error)
+	}
+	return nil
+}
