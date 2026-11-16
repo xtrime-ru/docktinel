@@ -4,13 +4,20 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
 
 // Every task owns a process group. Cancel the group, not just its shell.
 func execute(ctx context.Context, task Task, onStart func(Identity)) (time.Duration, error) {
-	cmd := exec.Command(task.Command[0], task.Command[1:]...)
+	path, err := taskCommandPath(task)
+	if err != nil {
+		return 0, err
+	}
+	cmd := exec.Command(path, task.Command[1:]...)
+	cmd.Args[0] = task.Command[0]
 	cmd.Env, cmd.Dir = task.Env, task.Dir
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -43,6 +50,38 @@ func execute(ctx context.Context, task Task, onStart func(Identity)) (time.Durat
 		}
 		return time.Since(started), ctx.Err()
 	}
+}
+
+// Resolve PATH in the task's captured environment, never the daemon's. Absolute
+// candidates also make relative PATH entries use the task's working directory.
+func taskCommandPath(task Task) (string, error) {
+	name := task.Command[0]
+	if strings.ContainsRune(name, '/') {
+		return name, nil
+	}
+	env := task.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	path := ""
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			path = value
+		}
+	}
+	cwd, err := filepath.Abs(task.Dir)
+	if err != nil {
+		return "", err
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		if candidate, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
 }
 
 func delay(ctx context.Context, d time.Duration) bool {
