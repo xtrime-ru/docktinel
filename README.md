@@ -126,7 +126,13 @@ The GitHub Actions workflow tests Linux behavior and publishes a minimal `scratc
 | Source | Image tag |
 | --- | --- |
 | Push to `main` | `ghcr.io/xtrime-ru/docktinel:edge` |
-| Tag `v0.1.0` | `:0.1.0`, `:0.1`, `:latest` |
+| Published prerelease `v0.1.0-rc.1` | `:0.1.0-rc.1` |
+| Published stable release `v0.1.0` | `:0.1.0`, `:0.1` |
+| Stable release selected as GitHub **Latest** | Additionally `:latest` |
+
+Create a GitHub Release to publish versioned images; pushing a Git tag alone does not publish. Tags must use `vMAJOR.MINOR.PATCH` with an optional prerelease suffix; build metadata (`+...`) is not supported in image versions. A prerelease flag or suffix prevents publishing the minor alias and `latest`.
+
+The `latest` promotion reuses the published multi-platform digest and checks GitHub's current Latest release immediately before promotion. Promotions are serialized across release tags. Publishing a maintenance release without selecting it as Latest keeps the current `latest` image. If you change the Latest selection later, rerun that release workflow (or its promotion job); changing the selection alone is not an image publication trigger.
 
 These tags become available after the workflow successfully runs; the initial implementation does not publish a release by itself. For reproducible deployments, pin a version or image digest. Ensure the GHCR package is public if public consumers need anonymous pulls.
 
