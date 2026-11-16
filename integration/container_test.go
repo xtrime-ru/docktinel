@@ -500,3 +500,36 @@ func TestClientCommandsFailWithoutDaemonEvenWithConfig(t *testing.T) {
 		f.mustExec("test", "!", "-e", "/run/docktinel/status.json")
 	}
 }
+
+func TestHelperRestartsWithoutRestartingContainer(t *testing.T) {
+	f := newFixture(t, `
+		docktinel daemon --heartbeat 100ms &
+		docktinel add process helper --failure restart-container --on-exit restart \
+			-- sh -c 'echo started >> /tmp/helper-starts'
+		exec docktinel startup --timeout 10s -- demo wait
+	`)
+	f.runtime()
+	eventually(t, func(ctx context.Context) (int, error) {
+		output, _, err := f.exec(ctx, "cat", "/tmp/helper-starts")
+		return strings.Count(output, "started\n"), err
+	}, func(starts int) bool { return starts >= 2 })
+	// The irrelevant failure flag must not make a restartable helper critical.
+	f.mustExec("docktinel", "healthcheck")
+	if state := f.runtime(); state.State != "healthy" {
+		t.Fatalf("helper restart changed container health: %+v", state)
+	}
+}
+
+func TestCriticalHelperStopsContainerOnSuccessfulExit(t *testing.T) {
+	f := newFixture(t, `
+		docktinel daemon --heartbeat 100ms &
+		docktinel add process helper --on-exit restart-container \
+			-- sh -c 'while [ ! -e /tmp/release-helper ]; do sleep 0.1; done'
+		exec docktinel startup --timeout 10s -- demo wait
+	`)
+	f.runtime()
+	f.mustExec("touch", "/tmp/release-helper")
+	if code := f.waitExit(); code == 0 {
+		t.Fatal("critical helper exit did not terminate the main application")
+	}
+}
