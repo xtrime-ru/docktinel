@@ -1,44 +1,42 @@
-# DNS and AdGuard integration recipe
+# AdGuard Home
 
-This is a registration recipe for an existing image, not a standalone AdGuard distribution. Supply the named helper scripts using your application's supported APIs and DNS tools.
+[Dockerfile](Dockerfile) extends the official AdGuard Home image with Docktinel. It embeds a DNS probe and a shell entrypoint that starts `docktinel daemon`, registers checks with `docktinel add`, then runs `exec docktinel startup -- "$@"`. No Docktinel JSON config is used; AdGuard Home keeps its own application configuration.
+
+From the repository root:
 
 ```sh
-#!/bin/sh
-set -eu
-
-docktinel daemon &
-
-# Resolve dynamic upstream endpoints before launching AdGuard. Retry for at
-# most a minute; do not block startup indefinitely on optional upstreams.
-docktinel add job dns-initial --phase startup --deadline 1m \
-    --timeout 5s --failure degrade -- /opt/bin/update-dns-endpoints
-
-# A real local DNS query, not merely an open port or a live PID.
-docktinel add check dns-ready --phase after-start --deadline 30s \
-    --timeout 5s --interval 1s -- /opt/bin/check-local-dns
-
-docktinel add check dns-serving --interval 5s --timeout 5s --failures 3 \
-    -- /opt/bin/check-local-dns
-
-# Detect endpoint changes and perform application-specific DNS reinitialization.
-# No restart on a temporary resolver/API failure; retry and report degraded.
-docktinel add job dns-refresh --interval 30s --timeout 10s --lock dns-state \
-    -- /opt/bin/update-dns-endpoints
-
-exec docktinel startup --timeout 2m -- /opt/AdGuardHome/AdGuardHome --no-check-update \
-    -c /opt/adguardhome/conf/AdGuardHome.yaml -w /opt/adguardhome/work
+docker build -t adguard-docktinel examples/adguard
 ```
 
-Adapt the AdGuard path and arguments to your existing image. Use `init: true`, the Docker healthcheck from the main README, and a restart policy.
+The build copies Docktinel from `ghcr.io/xtrime-ru/docktinel:latest`. Override `DOCKTINEL_IMAGE` to select another version or digest.
 
-## Helper contracts
+Start with **existing, configured AdGuard Home directories**:
 
-`check-local-dns` should issue an actual DNS query through the local serving path with a bounded timeout, inspect the response code, and return zero only for an acceptable answer. Choose a stable domain allowed by your filters. Avoid coupling serving health to a single optional upstream; the query must be able to use your configured fallback. A readiness check can retry startup failures for its configured deadline.
+```sh
+docker run -d --name adguard-docktinel --init --restart unless-stopped \
+    --stop-timeout 30 \
+    -p 53:53/tcp -p 53:53/udp -p 3000:3000/tcp \
+    -v "$PWD/adguard/conf:/opt/adguardhome/conf" \
+    -v "$PWD/adguard/work:/opt/adguardhome/work" \
+    adguard-docktinel
+```
 
-`update-dns-endpoints` should resolve upstream names through a bootstrap resolver independent of the DNS service it is maintaining; compare normalized endpoint sets with the last successfully applied state. On a temporary error, return nonzero and keep the last known working configuration. On change, apply the supported reinitialization/reload operation and clear the relevant application resolver caches; record the new state only after success. Serialize related changes using the same Docktinel lock.
+Keep the web port mapping appropriate to your AdGuard configuration. For a new installation, finish the setup wizard using the official image first: DNS readiness cannot pass before DNS is configured.
 
-If the application requires a full restart to reinitialize its DNS resolver, the helper can call `docktinel restart --reason 'upstream addresses changed'`. Ensure initialization persists or derives the new endpoints before the next launch, so a restart does not repeat indefinitely. A helper cannot reset another application's private resolver cache just by changing `/etc/hosts` or flushing the operating system cache.
+## Checks and recovery
 
-Keep AdGuard's built-in filter update schedule. A failed filter download should not by itself fail the serving check: existing filters and DNS service may remain usable. Configure fallback upstreams and upstream request timeouts in AdGuard itself. Docktinel does not alter AdGuard configuration or add another filter downloader.
+- After launch, Docktinel waits up to one minute for a successful DNS query.
+- Runtime checks wait five seconds between attempts. Three consecutive failures stop the application; Docker's restart policy starts the container again.
+- The independent Docker healthcheck detects a dead or frozen Docktinel daemon.
 
-For a VPN container, register the DNS dependency as a startup/runtime check with a failure policy appropriate to the protocol. Stopping a WireGuard server does not automatically remove a client's tunnel or its routes; service restart is recovery, not a guarantee that clients switch to a direct connection.
+The probe uses `dig` with a two-second query timeout and checks the DNS response code, not just the command's exit status. `SERVFAIL`, `REFUSED`, `NXDOMAIN` and timeouts fail. Select a stable, allowed probe name that returns `NOERROR` through your serving configuration; a cached answer is sufficient to confirm serving health.
+
+| ENV | Default |
+| --- | --- |
+| `DNS_PROBE_NAME` | `example.org` |
+| `DNS_PROBE_ADDRESS` | `127.0.0.1` |
+| `DNS_PROBE_PORT` | `53` |
+
+For example, add `-e DNS_PROBE_NAME=your-allowed-domain.example` to the run command. The address and port must match the local DNS listener. Inspect state with `docker exec adguard-docktinel docktinel status`.
+
+AdGuard keeps its own filter update schedule and configuration. Configure fallback upstreams, upstream timeouts and DNS cache reinitialization in your application setup; this example does not add another filter updater or DNS endpoint refresh loop. Pin `ADGUARD_IMAGE` and `DOCKTINEL_IMAGE` build arguments to versions or digests for reproducible builds.

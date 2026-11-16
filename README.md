@@ -158,7 +158,7 @@ Source builds and tests require **Go 1.27+**. Docker builds include the toolchai
 - [Command reference](docs/commands.md): task options, retries, shutdown and recovery.
 - [Configuration and ENV](docs/configuration.md): schema, substitution and startup modes.
 - [Local HTTP API](docs/api.md): control over a private Unix socket; healthcheck remains independent.
-- [HTTP demo](examples/basic/README.md) and [DNS/AdGuard recipe](examples/adguard/README.md).
+- [HTTP demo with JSON configuration](examples/basic/README.md) and [AdGuard Home with CLI registration](examples/adguard/README.md).
 - [Contributing](CONTRIBUTING.md): development setup and test commands.
 
 ## License
