@@ -2,10 +2,6 @@
 variable "DOCKTINEL_SOURCE" {
   default = "target:docktinel"
 }
-variable "GO_VERSION" {
-  default = "1"
-}
-
 group "default" {
   targets = ["docktinel", "demo"]
 }
@@ -13,9 +9,6 @@ group "default" {
 target "docktinel" {
   context = "."
   tags    = ["docktinel:local"]
-  args = {
-    GO_VERSION = GO_VERSION
-  }
 }
 
 target "demo" {
@@ -23,7 +16,6 @@ target "demo" {
   tags    = ["docktinel-demo:local"]
   args = {
     DOCKTINEL_IMAGE = "docktinel-source"
-    GO_VERSION     = GO_VERSION
   }
   contexts = {
     docktinel-source = DOCKTINEL_SOURCE

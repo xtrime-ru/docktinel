@@ -20,12 +20,9 @@ permissions:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    outputs:
-      go-version: ${{ steps.go.outputs.go-version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
-        id: go
         with:
           go-version: '1.x'
           check-latest: true
@@ -38,7 +35,6 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     outputs:
-      go-version: ${{ needs.prepare.outputs.go-version }}
       image: ${{ steps.image.outputs.name }}
       tags: ${{ steps.meta.outputs.tags }}
       digest: ${{ steps.build.outputs.digest }}
@@ -84,9 +80,7 @@ jobs:
             type=oci,dest=${{ runner.temp }}/docktinel-image.tar
             type=local,dest=${{ runner.temp }}/image-root
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            GO_VERSION=${{ needs.prepare.outputs.go-version }}
-            VERSION=${{ github.event.release.tag_name || github.ref_name }}
+          build-args: VERSION=${{ github.event.release.tag_name || github.ref_name }}
           # Re-run tests on every CI build; reuse their compiled test binaries.
           no-cache-filters: test
           cache-from: |
@@ -126,7 +120,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ needs.build.outputs.go-version }}
+          go-version: '1.x'
+          check-latest: true
           cache: true
           cache-dependency-path: |
             integration/go.mod
@@ -145,7 +140,6 @@ jobs:
         uses: docker/bake-action@v7
         env:
           DOCKTINEL_SOURCE: oci-layout://${{ runner.temp }}/docktinel-image
-          GO_VERSION: ${{ needs.build.outputs.go-version }}
         with:
           source: .
           allow: fs.read=${{ runner.temp }}/docktinel-image

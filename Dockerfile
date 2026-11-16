@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG GO_VERSION=1
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS source
+FROM --platform=$BUILDPLATFORM golang:1-trixie AS source
 WORKDIR /src
 COPY go.mod ./
 COPY internal ./internal

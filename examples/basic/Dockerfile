@@ -1,7 +1,6 @@
 ARG DOCKTINEL_IMAGE=ghcr.io/xtrime-ru/docktinel:latest
-ARG GO_VERSION=1
 FROM ${DOCKTINEL_IMAGE} AS docktinel
-FROM golang:${GO_VERSION}-bookworm AS demo-build
+FROM golang:1-trixie AS demo-build
 WORKDIR /src
 COPY main.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/demo main.go

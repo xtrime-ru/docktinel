@@ -2,12 +2,12 @@
 
 Docktinel targets Linux containers and keeps service-specific behavior in external commands. Please include the failure scenario your change addresses and keep the CLI independent of individual applications.
 
-CI and Docker builds use the latest stable Go 1.x; CI resolves one version for all jobs and Docker stages. The minimum supported version is Go 1.27. Docker builds compile unit tests in `test-build` and execute them in `test`; CI always reruns the latter. Test files and caches are excluded from the final `scratch` image.
+CI uses the latest stable Go `1.x`; Docker builds use `golang:1-trixie`. The minimum supported version is Go 1.27. Docker builds compile unit tests in `test-build` and execute them in `test`; CI always reruns the latter. Test files and caches are excluded from the final `scratch` image.
 
 Run `make test` on Linux with Go 1.27+. On macOS, tests that require Linux `/proc` are skipped; run the Linux suite in Docker instead:
 
 ```sh
-docker run --rm --init -v "$PWD:/src" -w /src golang:1-bookworm \
+docker run --rm --init -v "$PWD:/src" -w /src golang:1-trixie \
     sh -ec 'go test -race ./...; go vet ./...'
 ```
 
