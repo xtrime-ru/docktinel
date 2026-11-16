@@ -1,11 +1,13 @@
 package docktinel
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAutoStartRequiresConfig(t *testing.T) {
@@ -29,7 +31,7 @@ func TestAutoStartRequiresConfig(t *testing.T) {
 func TestMissingConfigNeverLaunchesDaemon(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DOCKTINEL_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
-	if err := ensureDaemon(dir, os.Getpid()); err == nil || !strings.Contains(err.Error(), "cannot auto-start daemon") {
+	if _, err := ensureDaemon(dir, os.Getpid()); err == nil || !strings.Contains(err.Error(), "cannot auto-start daemon") {
 		t.Fatalf("got %v", err)
 	}
 	for _, file := range []string{"control.sock", "status.json", "identity.json"} {
@@ -43,7 +45,29 @@ func TestExistingDaemonDoesNotRequireConfig(t *testing.T) {
 	d := &Daemon{status: Status{Version: 1, Phase: "configuring", State: "starting"}}
 	dir := serveTestAPI(t, d)
 	t.Setenv("DOCKTINEL_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
-	if err := ensureDaemon(dir, os.Getpid()); err != nil {
+	if _, err := ensureDaemon(dir, os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestFileLockContentionAndCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	lock, err := tryFileLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if _, err := waitFileLock(ctx, path); err != context.DeadlineExceeded {
+		t.Fatalf("contender: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reacquired, err := tryFileLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reacquired.Close()
 }

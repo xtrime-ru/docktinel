@@ -3,6 +3,7 @@ package docktinel
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +79,7 @@ func TestConfigValidation(t *testing.T) {
 			t.Fatalf("accepted %s", body)
 		}
 	}
-	if err := os.WriteFile(path, bytes.Repeat([]byte(" "), maxAPIBody+1), 0600); err != nil {
+	if err := os.WriteFile(path, bytes.Repeat([]byte(" "), maxJSONSize+1), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadConfig(path, true); err == nil {
@@ -167,5 +168,29 @@ func TestAfterStartSharesOriginalBudget(t *testing.T) {
 	}
 	if err := d.runPhase("after-start", d.tasks); err != context.DeadlineExceeded {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestConfigPreservesIntegerPrecision(t *testing.T) {
+	task, err := decodeConfigTask([]byte(`{"kind":"job","name":"large","command":["true"],"failures":9007199254740993}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(task.Failures); got != "9007199254740993" {
+		t.Fatalf("integer rounded to %s", got)
+	}
+}
+
+func TestConfigRejectsDuplicateTaskMembers(t *testing.T) {
+	_, err := decodeConfigTask([]byte(`{"kind":"job","name":"one","name":"two","command":["true"]}`))
+	if err == nil {
+		t.Fatal("accepted ambiguous task names")
+	}
+}
+
+func TestConfigRejectsInvalidUTF8FromENV(t *testing.T) {
+	t.Setenv("INVALID_UTF8", string([]byte{0xff}))
+	if _, err := decodeConfigTask([]byte(`{"kind":"job","name":"bad","command":["true","${INVALID_UTF8}"]}`)); err == nil {
+		t.Fatal("accepted invalid UTF-8 after ENV expansion")
 	}
 }

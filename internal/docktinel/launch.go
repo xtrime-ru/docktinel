@@ -1,6 +1,7 @@
 package docktinel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,88 +12,85 @@ import (
 	"time"
 )
 
-// ensureDaemon serializes launchers and checks the daemon's actual lock. A
-// frozen API is never a reason to start a replacement beside a live daemon.
-func ensureDaemon(dir string, mainPID int) error {
+const daemonProbeTimeout = 200 * time.Millisecond
+
+// Return the connected daemon's status so startup need not query it again.
+// A frozen API is never a reason to start a second daemon beside a live one.
+func ensureDaemon(dir string, mainPID int) (Status, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+		return Status{}, err
 	}
-	launcher, err := os.OpenFile(filepath.Join(dir, "launch.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	launcher, err := waitFileLock(ctx, filepath.Join(dir, "launch.lock"))
 	if err != nil {
-		return err
+		return Status{}, fmt.Errorf("wait for daemon launcher: %w", err)
 	}
 	defer launcher.Close()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		err = syscall.Flock(int(launcher.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
-			return fmt.Errorf("wait for daemon launcher: %w", err)
-		}
-		time.Sleep(25 * time.Millisecond)
+	if state, err := daemonStatus(dir, min(daemonProbeTimeout, time.Until(deadline))); err == nil {
+		return state, nil
 	}
-	defer syscall.Flock(int(launcher.Fd()), syscall.LOCK_UN)
-	var state Status
-	if callAPI(dir, "GET", "/v1/status", nil, &state, 200*time.Millisecond) == nil {
-		return nil
-	}
-	lock, err := os.OpenFile(filepath.Join(dir, "daemon.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := tryFileLock(filepath.Join(dir, "daemon.lock"))
 	if err != nil {
-		return err
-	}
-	err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err != nil {
-		lock.Close()
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return err
+			return Status{}, err
 		}
-		if err := callAPI(dir, "GET", "/v1/status", nil, &state, 5*time.Second); err != nil {
-			return fmt.Errorf("daemon is running but its API is unavailable: %w", err)
+		state, err := daemonStatus(dir, time.Until(deadline))
+		if err != nil {
+			return Status{}, fmt.Errorf("daemon is running but its API is unavailable: %w", err)
 		}
-		return nil
+		return state, nil
 	}
-	// Only the daemon holds this lock permanently. Drop the probe lock before
-	// starting it; competing explicit daemons are still protected by daemon.lock.
-	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	// The daemon owns its lock permanently. Release the probe lock before
+	// starting it; competing explicit daemons still use that same lock.
 	lock.Close()
 	path, err := autoStartConfig()
 	if err != nil {
-		return err
+		return Status{}, err
 	}
 	binary, err := os.Executable()
 	if err != nil {
-		return err
+		return Status{}, err
 	}
 	cmd := exec.Command(binary, "--runtime-dir", dir, "daemon", "--config", path, "--main-pid", strconv.Itoa(mainPID))
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Start(); err != nil {
-		return err
+	if err := ctx.Err(); err != nil {
+		return Status{}, err
 	}
+	if err := cmd.Start(); err != nil {
+		return Status{}, err
+	}
+	return waitDaemon(ctx, dir, cmd)
+}
+
+func waitDaemon(ctx context.Context, dir string, cmd *exec.Cmd) (Status, error) {
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if callAPI(dir, "GET", "/v1/status", nil, &state, 100*time.Millisecond) == nil {
-			return nil
+	deadline, _ := ctx.Deadline()
+	for ctx.Err() == nil {
+		timeout := min(daemonProbeTimeout, time.Until(deadline))
+		if state, err := daemonStatus(dir, timeout); err == nil {
+			return state, nil
 		}
 		select {
 		case err := <-exited:
 			// An explicitly launched daemon may have won the lock race.
-			if callAPI(dir, "GET", "/v1/status", nil, &state, 200*time.Millisecond) == nil {
-				return nil
+			if state, probeErr := daemonStatus(dir, min(daemonProbeTimeout, time.Until(deadline))); probeErr == nil {
+				return state, nil
 			}
-			return fmt.Errorf("daemon failed to start: %v", err)
+			return Status{}, fmt.Errorf("daemon exited before its API became ready: %v", err)
 		default:
 		}
+		if !delay(ctx, retryInterval) {
+			break
+		}
 	}
-	return errors.New("daemon did not become ready within 5s; inspect daemon logs")
+	return Status{}, fmt.Errorf("daemon did not become ready: %w", ctx.Err())
 }
 
 // Explicit daemon mode supports CLI-only registration. Automatic startup must
-// have a file, and passes it explicitly so disappearance before child loading
-// cannot silently turn a configured launch into an empty daemon.
+// have a file; passing its path explicitly makes it required in the child too.
 func autoStartConfig() (string, error) {
 	path, _ := configPath("")
 	info, err := os.Stat(path)

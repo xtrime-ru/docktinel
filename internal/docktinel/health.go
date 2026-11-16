@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -16,17 +18,21 @@ func Evaluate(s Status, container string, now float64, maxAge time.Duration) (bo
 	if s.Heartbeat <= 0 || now < s.Heartbeat || now-s.Heartbeat > maxAge.Seconds() {
 		return true, "watchdog heartbeat expired or invalid"
 	}
-	if s.Phase == "stopping" {
+	switch s.Phase {
+	case "stopping":
 		if s.StopDeadline <= 0 || now > s.StopDeadline {
 			return true, "shutdown deadline exceeded"
 		}
 		return false, "stopping: " + s.Reason
-	}
-	if s.Phase != "runtime" {
+	case "configuring", "startup", "awaiting-main", "after-start":
 		if s.StartupDeadline <= 0 || now > s.StartupDeadline {
 			return true, "startup deadline exceeded"
 		}
 		return false, "starting: " + s.Phase
+	case "runtime":
+		// Validate runtime tasks below.
+	default:
+		return true, "invalid lifecycle phase: " + s.Phase
 	}
 	for _, task := range s.Tasks {
 		if task.Critical && task.Due > 0 && now > task.Due {
@@ -34,7 +40,7 @@ func Evaluate(s Status, container string, now float64, maxAge time.Duration) (bo
 		}
 	}
 	if s.State != "healthy" && s.State != "degraded" {
-		return false, "unhealthy: " + s.Reason
+		return true, "invalid runtime state: " + s.State
 	}
 	return false, ""
 }
@@ -51,15 +57,14 @@ func emergencyStop(dir string, container string, target Identity, now float64, g
 	if !sameProcess(target) {
 		return errors.New("no verified main process to stop")
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, "health-stop.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := tryFileLock(filepath.Join(dir, "health-stop.lock"))
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return nil
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	path := filepath.Join(dir, "health-stop.json")
 	record, _ := readJSON[stopRecord](path)
 	if record.Container != container || record.Target != target || record.Started <= 0 {
@@ -143,8 +148,8 @@ func containerAge(now float64) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	var ticks float64
-	if _, err := fmt.Sscan(p.Start, &ticks); err != nil {
+	ticks, err := strconv.ParseFloat(p.Start, 64)
+	if err != nil {
 		return 0, err
 	}
 	return now - ticks/100, nil
@@ -157,15 +162,13 @@ func initChild() (Identity, error) {
 	}
 	// Multiple direct children can include adopted workers. Only a single
 	// child is unambiguous; otherwise require the published main identity.
-	var pids []int
-	for _, field := range splitFields(string(b)) {
-		var pid int
-		if _, err := fmt.Sscan(field, &pid); err == nil {
-			pids = append(pids, pid)
-		}
-	}
-	if len(pids) != 1 {
+	children := strings.Fields(string(b))
+	if len(children) != 1 {
 		return Identity{}, errors.New("cannot identify a unique init child")
 	}
-	return processIdentity(pids[0])
+	pid, err := strconv.Atoi(children[0])
+	if err != nil {
+		return Identity{}, err
+	}
+	return processIdentity(pid)
 }

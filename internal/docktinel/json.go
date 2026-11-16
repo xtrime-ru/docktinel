@@ -2,6 +2,8 @@ package docktinel
 
 import (
 	"encoding/json/v2"
+	"errors"
+	"io"
 	"strconv"
 	"time"
 )
@@ -19,3 +21,14 @@ var durationUnmarshalers = json.WithUnmarshalers(json.UnmarshalFunc(func(b []byt
 	}
 	return err
 }))
+
+func readJSONBytes(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxJSONSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxJSONSize {
+		return nil, errors.New("JSON document exceeds 1 MiB")
+	}
+	return data, nil
+}

@@ -70,6 +70,8 @@ func TestHealthEvaluation(t *testing.T) {
 	}{
 		{"healthy", func(s *Status) {}, false, false},
 		{"degraded", func(s *Status) { s.State = "degraded" }, false, false},
+		{"invalid-phase", func(s *Status) { s.Phase = "typo"; s.StartupDeadline = 200 }, true, true},
+		{"invalid-state", func(s *Status) { s.State = "typo" }, true, true},
 		{"stale", func(s *Status) { s.Heartbeat = 60 }, true, true},
 		{"future", func(s *Status) { s.Heartbeat = 200 }, true, true},
 		{"other-container", func(s *Status) { s.Container = "old" }, true, true},
@@ -329,5 +331,135 @@ func TestTaskDeadlineAllowsNextPublication(t *testing.T) {
 	state := d.snapshot()
 	if state.Tasks[0].Due < state.Heartbeat+10 {
 		t.Fatal("deadline ignores publication interval", state)
+	}
+}
+
+func TestProcessCriticalityUsesOnExitOnly(t *testing.T) {
+	for _, tc := range []struct {
+		failure, onExit string
+		critical        bool
+	}{
+		{"degrade", "restart", false},
+		{"restart-container", "restart", false},
+		{"degrade", "restart-container", true},
+		{"restart-container", "restart-container", true},
+	} {
+		d := testDaemon(t)
+		task := testTask("process", "process", "true")
+		task.Failure, task.OnExit = tc.failure, tc.onExit
+		if err := d.add(&task); err != nil {
+			t.Fatal(err)
+		}
+		if got := d.snapshot().Tasks[0].Critical; got != tc.critical {
+			t.Fatalf("failure=%s on_exit=%s: critical=%v", tc.failure, tc.onExit, got)
+		}
+	}
+}
+
+func TestDegradedPersistsDuringRetryUntilSuccess(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("retry", "job", "sleep 0.15")
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	d.status.Phase = "runtime"
+	d.markFailure(task, os.ErrInvalid)
+	done := make(chan error, 1)
+	go func() { done <- d.attempt(context.Background(), task) }()
+	deadline := time.Now().Add(time.Second)
+	for d.snapshot().Tasks[0].State != "running" {
+		if time.Now().After(deadline) {
+			t.Fatal("retry did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if state := d.snapshot().State; state != "degraded" {
+		t.Fatalf("retry hid previous failure: %s", state)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if state := d.snapshot().State; state != "healthy" {
+		t.Fatalf("success did not recover: %s", state)
+	}
+}
+
+func TestRuntimeTransitionPublishesWithoutHeartbeat(t *testing.T) {
+	d := testDaemon(t)
+	d.cfg.Heartbeat = time.Hour
+	task := testTask("delayed", "check", "true")
+	task.Grace = time.Minute
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startup(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	self, err := processIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.status.Main = self
+	if err := d.attach(&self); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		state, err := readStatus(d.cfg.Dir)
+		if err == nil && state.Phase == "runtime" {
+			if len(state.Tasks) != 1 || state.Tasks[0].Due <= state.Heartbeat {
+				t.Fatal("runtime published before scheduling tasks", state)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime transition not published: %+v, %v", state, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestConcurrentPublicationKeepsStoppingState(t *testing.T) {
+	d := testDaemon(t)
+	if err := d.publish(); err != nil {
+		t.Fatal(err)
+	}
+	var writers sync.WaitGroup
+	for range 16 {
+		writers.Go(func() {
+			if err := d.publish(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	d.stop("review test", false)
+	writers.Wait()
+	state, err := readStatus(d.cfg.Dir)
+	if err != nil || state.Phase != "stopping" || state.Reason != "review test" {
+		t.Fatalf("stale transition: %+v, %v", state, err)
+	}
+}
+
+func TestVersionValidatesArguments(t *testing.T) {
+	var out, stderr bytes.Buffer
+	if code := CLI([]string{"version", "unexpected"}, &out, &stderr, "test"); code == 0 {
+		t.Fatal("version ignored an unexpected argument")
+	}
+}
+
+func TestExpiredPhaseDoesNotLaunchProcess(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("late", "process", "true")
+	task.Phase = "startup"
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	now, _ := uptime()
+	d.status.StartupDeadline = now - 1
+	if err := d.runPhase("startup", d.tasks); err != context.DeadlineExceeded {
+		t.Fatalf("got %v", err)
+	}
+	if state := d.snapshot().Tasks[0]; state.State != "pending" || state.Due != 0 {
+		t.Fatalf("expired phase scheduled a process: %+v", state)
 	}
 }

@@ -70,3 +70,14 @@ func TestStatusOmitsZeroFields(t *testing.T) {
 		}
 	}
 }
+
+func TestStateRejectsOversizeValidJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	data := append([]byte(`{"phase":"runtime"}`), bytes.Repeat([]byte(" "), maxJSONSize)...)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readJSON[Status](path); err == nil {
+		t.Fatal("accepted oversized document hidden by trailing whitespace")
+	}
+}

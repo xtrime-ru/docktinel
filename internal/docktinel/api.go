@@ -14,8 +14,6 @@ import (
 	"time"
 )
 
-const maxAPIBody = 1 << 20
-
 func (d *Daemon) controlServer() *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +31,7 @@ func (d *Daemon) controlServer() *http.Server {
 		finishAPI(w, d.add(&task))
 	})
 	mux.HandleFunc("POST /v1/startup", func(w http.ResponseWriter, r *http.Request) {
-		req := startupRequest{Timeout: 2 * time.Minute}
+		req := startupRequest{Timeout: defaultStartupTimeout}
 		if !decodeAPI(w, r, &req) {
 			return
 		}
@@ -63,8 +61,8 @@ func (d *Daemon) controlServer() *http.Server {
 		finishAPI(w, nil)
 	})
 	return &http.Server{
-		Handler: mux, ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
+		Handler: mux, ReadHeaderTimeout: apiTimeout,
+		ReadTimeout: apiTimeout, IdleTimeout: 30 * time.Second,
 		MaxHeaderBytes: 16 << 10,
 		// No global WriteTimeout: startup can take minutes. writeAPI applies
 		// a deadline only once the operation has finished.
@@ -72,7 +70,7 @@ func (d *Daemon) controlServer() *http.Server {
 }
 
 func decodeAPI(w http.ResponseWriter, r *http.Request, value any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBody)
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONSize)
 	err := json.UnmarshalRead(r.Body, value, durationUnmarshalers, json.RejectUnknownMembers(true))
 	if err == nil {
 		return true
@@ -94,7 +92,7 @@ func finishAPI(w http.ResponseWriter, err error) {
 }
 
 func writeAPI(w http.ResponseWriter, code int, value any) {
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(apiTimeout))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.MarshalEncode(jsontext.NewEncoder(w), value, durationMarshalers)
@@ -122,12 +120,8 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 			if err == nil {
 				return conn, nil
 			}
-			timer := time.NewTimer(25 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !delay(ctx, retryInterval) {
 				return nil, fmt.Errorf("connect to daemon: %w", ctx.Err())
-			case <-timer.C:
 			}
 		}
 	}}
@@ -147,10 +141,13 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 		return err
 	}
 	defer response.Body.Close()
-	reader = io.LimitReader(response.Body, maxAPIBody)
+	data, err = readJSONBytes(response.Body)
+	if err != nil {
+		return err
+	}
 	if response.StatusCode != http.StatusOK {
 		var failure apiError
-		if err := json.UnmarshalRead(reader, &failure); err == nil && failure.Error != "" {
+		if err := json.Unmarshal(data, &failure); err == nil && failure.Error != "" {
 			return errors.New(failure.Error)
 		}
 		return fmt.Errorf("daemon API: %s", response.Status)
@@ -158,5 +155,11 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 	if result == nil {
 		result = &struct{}{}
 	}
-	return json.UnmarshalRead(reader, result, durationUnmarshalers)
+	return json.Unmarshal(data, result, durationUnmarshalers)
+}
+
+func daemonStatus(dir string, timeout time.Duration) (Status, error) {
+	var state Status
+	err := callAPI(dir, http.MethodGet, "/v1/status", nil, &state, timeout)
+	return state, err
 }

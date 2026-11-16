@@ -20,6 +20,8 @@ func execute(ctx context.Context, task Task, onStart func(Identity)) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// All exit paths clean up children left in the command's process group.
+	defer syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	if p, err := processIdentity(cmd.Process.Pid); err == nil && onStart != nil {
 		onStart(p)
 	}
@@ -27,12 +29,10 @@ func execute(ctx context.Context, task Task, onStart func(Identity)) error {
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
-		// A command must not leave background children behind after exiting.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return err
 	case <-ctx.Done():
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		timer := time.NewTimer(2 * time.Second)
+		timer := time.NewTimer(commandStopGrace)
 		defer timer.Stop()
 		select {
 		case <-done:
@@ -40,7 +40,6 @@ func execute(ctx context.Context, task Task, onStart func(Identity)) error {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			<-done
 		}
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return ctx.Err()
 	}
 }

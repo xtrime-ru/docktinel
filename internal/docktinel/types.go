@@ -7,7 +7,14 @@ import (
 	"time"
 )
 
-const DefaultDir = "/run/docktinel"
+const (
+	DefaultDir            = "/run/docktinel"
+	defaultStartupTimeout = 2 * time.Minute
+	apiTimeout            = 5 * time.Second
+	retryInterval         = 25 * time.Millisecond
+	commandStopGrace      = 2 * time.Second
+	maxJSONSize           = 1 << 20
+)
 
 var taskName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
@@ -27,6 +34,26 @@ type Task struct {
 	Failure  string        `json:"failure"`
 	OnExit   string        `json:"on_exit"`
 	Lock     string        `json:"lock,omitempty"`
+}
+
+func taskDefaults(kind, name string) Task {
+	t := Task{Name: name, Kind: kind, Phase: "runtime", Timeout: time.Minute, Deadline: time.Minute,
+		Failures: 3, Failure: "degrade", OnExit: "restart"}
+	switch kind {
+	case "check":
+		t.Interval, t.Timeout, t.Failure = 10*time.Second, 5*time.Second, "restart-container"
+	case "process":
+		t.Timeout = 0
+	}
+	return t
+}
+
+// Processes use on_exit; checks and jobs use the failure policy.
+func (t Task) critical() bool {
+	if t.Kind == "process" {
+		return t.OnExit == "restart-container"
+	}
+	return t.Failure == "restart-container"
 }
 
 func (t Task) Validate() error {
@@ -51,8 +78,8 @@ func (t Task) Validate() error {
 	if t.Kind != "process" && t.Timeout == 0 {
 		return errors.New("checks and jobs require a positive timeout")
 	}
-	if t.Kind == "check" && (t.Interval == 0 || t.Failures < 1) {
-		return errors.New("checks require an interval and a positive failure threshold")
+	if t.Kind == "check" && t.Interval == 0 {
+		return errors.New("checks require a positive interval")
 	}
 	if t.Failures < 1 {
 		return errors.New("failures must be positive")
@@ -68,9 +95,6 @@ func (t Task) Validate() error {
 	}
 	if t.Kind == "check" && (t.Lock != "" || t.Phase == "shutdown") {
 		return errors.New("checks cannot use locks or run at shutdown")
-	}
-	if t.Phase == "shutdown" && t.Kind != "job" {
-		return errors.New("shutdown tasks must be jobs")
 	}
 	return nil
 }

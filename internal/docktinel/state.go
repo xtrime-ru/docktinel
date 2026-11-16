@@ -5,7 +5,6 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -100,7 +99,11 @@ func readJSON[T any](path string) (value T, err error) {
 		return value, err
 	}
 	defer f.Close()
-	if err = json.UnmarshalRead(io.LimitReader(f, 1<<20), &value); err != nil {
+	data, err := readJSONBytes(f)
+	if err != nil {
+		return value, err
+	}
+	if err = json.Unmarshal(data, &value); err != nil {
 		var zero T
 		return zero, err
 	}

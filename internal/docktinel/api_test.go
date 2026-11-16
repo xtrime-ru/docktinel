@@ -74,7 +74,7 @@ func TestAPIRejectsInvalidRequests(t *testing.T) {
 		{"POST", "/v1/tasks", "{}", 400},
 		{"POST", "/v1/tasks", `{"unknown":true}`, 400},
 		{"POST", "/v1/tasks", "{} {}", 400},
-		{"POST", "/v1/tasks", `{"name":"` + strings.Repeat("a", maxAPIBody) + `"}`, 413},
+		{"POST", "/v1/tasks", `{"name":"` + strings.Repeat("a", maxJSONSize) + `"}`, 413},
 		{"POST", "/v1/startup", "", 400},
 		{"POST", "/v1/startup", `{"unknown":true}`, 400},
 		{"POST", "/v1/main", "{}", 409},
