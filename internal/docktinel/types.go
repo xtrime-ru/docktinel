@@ -86,9 +86,9 @@ type TaskStatus struct {
 	State         string    `json:"state"`
 	Reason        string    `json:"reason,omitempty"`
 	Failures      int       `json:"failures"`
-	LastStarted   float64   `json:"last_started,omitempty"`
-	LastCompleted float64   `json:"last_completed,omitempty"`
-	Due           float64   `json:"due,omitempty"`
+	LastStarted   float64   `json:"last_started,omitzero"`
+	LastCompleted float64   `json:"last_completed,omitzero"`
+	Due           float64   `json:"due,omitzero"`
 	Critical      bool      `json:"critical"`
 	Process       *Identity `json:"process,omitempty"`
 }
@@ -105,7 +105,7 @@ type Status struct {
 	Heartbeat       float64      `json:"heartbeat"`
 	UpdatedAt       string       `json:"updated_at"`
 	StartupDeadline float64      `json:"startup_deadline"`
-	StopDeadline    float64      `json:"stop_deadline,omitempty"`
+	StopDeadline    float64      `json:"stop_deadline,omitzero"`
 	Tasks           []TaskStatus `json:"tasks"`
 }
 

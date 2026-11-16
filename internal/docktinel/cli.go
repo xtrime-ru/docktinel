@@ -1,7 +1,8 @@
 package docktinel
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"flag"
 	"fmt"
@@ -125,9 +126,7 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 			return err
 		}
 		if *asJSON {
-			encoder := json.NewEncoder(out)
-			encoder.SetIndent("", "  ")
-			return encoder.Encode(s)
+			return json.MarshalEncode(jsontext.NewEncoder(out, jsontext.WithIndent("  ")), s)
 		}
 		now, _ := uptime()
 		fmt.Fprintf(out, "%s (%s), snapshot age %.1fs\n", s.State, s.Phase, now-s.Heartbeat)

@@ -2,7 +2,7 @@
 
 Docktinel targets Linux containers and keeps service-specific behavior in external commands. Please include the failure scenario your change addresses and keep the CLI independent of individual applications.
 
-Run `make test` on Linux with Go 1.26+. On macOS, tests that require Linux `/proc` are skipped; run the Linux suite in Docker instead:
+Run `make test` on Linux with Go 1.27+. On macOS, tests that require Linux `/proc` are skipped; run the Linux suite in Docker instead:
 
 ```sh
 docker run --rm --init -v "$PWD:/src" -w /src golang:1.27.4-bookworm \

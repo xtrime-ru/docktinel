@@ -3,7 +3,7 @@ package docktinel
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"net"
 	"net/http/httptest"
 	"os"

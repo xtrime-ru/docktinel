@@ -3,7 +3,8 @@ package docktinel
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -67,21 +68,12 @@ func (d *Daemon) controlServer() *http.Server {
 
 func decodeAPI(w http.ResponseWriter, r *http.Request, value any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxAPIBody)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	err := decoder.Decode(value)
+	err := json.UnmarshalRead(r.Body, value, durationUnmarshalers, json.RejectUnknownMembers(true))
 	if err == nil {
-		var extra any
-		if err = decoder.Decode(&extra); err == io.EOF {
-			return true
-		}
-		if err == nil {
-			err = errors.New("expected one JSON value")
-		}
+		return true
 	}
 	code := http.StatusBadRequest
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		code = http.StatusRequestEntityTooLarge
 	}
 	writeAPI(w, code, apiError{err.Error()})
@@ -100,7 +92,7 @@ func writeAPI(w http.ResponseWriter, code int, value any) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Second))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(value)
+	_ = json.MarshalEncode(jsontext.NewEncoder(w), value, durationMarshalers)
 }
 
 func callAPI(dir, method, path string, body, result any, timeout time.Duration) error {
@@ -110,7 +102,7 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 	if body == nil {
 		body = struct{}{}
 	}
-	data, err := json.Marshal(body)
+	data, err := json.Marshal(body, durationMarshalers)
 	if err != nil {
 		return err
 	}
@@ -150,10 +142,10 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 		return err
 	}
 	defer response.Body.Close()
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxAPIBody))
+	reader = io.LimitReader(response.Body, maxAPIBody)
 	if response.StatusCode != http.StatusOK {
 		var failure apiError
-		if err := decoder.Decode(&failure); err == nil && failure.Error != "" {
+		if err := json.UnmarshalRead(reader, &failure); err == nil && failure.Error != "" {
 			return errors.New(failure.Error)
 		}
 		return fmt.Errorf("daemon API: %s", response.Status)
@@ -161,5 +153,5 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 	if result == nil {
 		result = &struct{}{}
 	}
-	return decoder.Decode(result)
+	return json.UnmarshalRead(reader, result, durationUnmarshalers)
 }

@@ -2,8 +2,6 @@ package docktinel
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,9 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
+	"uuid"
 )
 
 type Config struct {
@@ -57,13 +57,9 @@ func newDaemon(cfg Config) (*Daemon, error) {
 	if main.PID <= 1 {
 		return nil, errors.New("start daemon from an entrypoint under Docker init: true / --init")
 	}
-	var token [16]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		return nil, err
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{cfg: cfg, states: map[string]TaskStatus{}, locks: map[string]chan struct{}{}, ctx: ctx, cancel: cancel, done: make(chan struct{}), status: Status{
-		Version: 1, Instance: hex.EncodeToString(token[:]), Container: container, Daemon: self, Main: main,
+		Version: 1, Instance: uuid.New().String(), Container: container, Daemon: self, Main: main,
 		Phase: "configuring", State: "starting", StartupDeadline: now + cfg.StartupTimeout.Seconds(),
 	}}, nil
 }
@@ -200,7 +196,7 @@ func (d *Daemon) startup() error {
 	}
 	d.status.Phase = "startup"
 	d.workers.Add(1)
-	tasks := append([]Task(nil), d.tasks...)
+	tasks := slices.Clone(d.tasks)
 	d.mu.Unlock()
 	defer d.workers.Done()
 	if err := d.runPhase("startup", tasks); err != nil {
@@ -231,7 +227,7 @@ func (d *Daemon) attach(main *Identity) error {
 	d.status.Main = *main
 	d.status.Phase = "after-start"
 	d.workers.Add(1)
-	tasks := append([]Task(nil), d.tasks...)
+	tasks := slices.Clone(d.tasks)
 	d.mu.Unlock()
 	if err := d.publish(); err != nil {
 		d.workers.Done()
@@ -311,13 +307,12 @@ func (d *Daemon) launch(task Task) {
 		d.mu.Unlock()
 		return
 	}
-	d.workers.Add(1)
 	now, _ := uptime()
 	s := d.states[task.Name]
 	s.Due = now + task.Grace.Seconds() + task.Timeout.Seconds() + d.cfg.Heartbeat.Seconds() + 5
 	d.states[task.Name] = s
+	d.workers.Go(func() { d.runTask(task) })
 	d.mu.Unlock()
-	go func() { defer d.workers.Done(); d.runTask(task) }()
 }
 
 func (d *Daemon) attempt(parent context.Context, task Task) error {
@@ -404,10 +399,7 @@ func (d *Daemon) runTask(task Task) {
 				return
 			}
 			if task.Kind != "check" {
-				pause = time.Duration(10*errorsInRow) * time.Second
-				if pause > time.Minute {
-					pause = time.Minute
-				}
+				pause = min(time.Duration(10*errorsInRow)*time.Second, time.Minute)
 			}
 		} else {
 			errorsInRow = 0
@@ -444,7 +436,7 @@ func (d *Daemon) stop(reason string, terminateMain bool) {
 		d.status.Reason = reason
 		d.status.StopDeadline = now + 2*d.cfg.StopGrace.Seconds() + 5
 		main := d.status.Main
-		tasks := append([]Task(nil), d.tasks...)
+		tasks := slices.Clone(d.tasks)
 		d.mu.Unlock()
 		slog.Warn("stopping", "reason", reason)
 		d.cancel()

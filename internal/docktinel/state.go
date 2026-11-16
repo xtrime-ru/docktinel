@@ -1,7 +1,9 @@
 package docktinel
 
 import (
-	"encoding/json"
+	"bytes"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"os"
@@ -30,11 +32,11 @@ func processIdentity(pid int) (Identity, error) {
 		return Identity{}, err
 	}
 	// comm may contain spaces and parentheses; field 3 follows its final ')'.
-	i := strings.LastIndexByte(string(b), ')')
-	if i < 0 {
+	_, fields, found := bytes.CutLast(b, []byte(")"))
+	if !found {
 		return Identity{}, fmt.Errorf("invalid process stat")
 	}
-	f := strings.Fields(string(b[i+1:]))
+	f := strings.Fields(string(fields))
 	if len(f) < 20 || f[0] == "Z" || f[0] == "X" {
 		return Identity{}, fmt.Errorf("process %d is not alive", pid)
 	}
@@ -69,7 +71,7 @@ func signalProcess(p Identity, signal syscall.Signal) error {
 }
 
 func writeJSON(path string, value any) error {
-	b, err := json.MarshalIndent(value, "", "  ")
+	b, err := json.Marshal(value, jsontext.WithIndent("  "))
 	if err != nil {
 		return err
 	}
@@ -91,13 +93,20 @@ func writeJSON(path string, value any) error {
 	return os.Rename(f.Name(), path)
 }
 
-func readStatus(dir string) (Status, error) {
-	f, err := os.Open(filepath.Join(dir, "status.json"))
+// readJSON decodes a complete, bounded document and rejects trailing JSON.
+func readJSON[T any](path string) (value T, err error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return Status{}, err
+		return value, err
 	}
 	defer f.Close()
-	var s Status
-	err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&s)
-	return s, err
+	if err = json.UnmarshalRead(io.LimitReader(f, 1<<20), &value); err != nil {
+		var zero T
+		return zero, err
+	}
+	return value, nil
+}
+
+func readStatus(dir string) (Status, error) {
+	return readJSON[Status](filepath.Join(dir, "status.json"))
 }

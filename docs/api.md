@@ -14,7 +14,7 @@ application. Keep the runtime directory private and inside the container.
 | `POST` | `/v1/main` | `{"pid":123,"start":"456"}` | `{}` after attaching the entrypoint |
 | `POST` | `/v1/restart` | `{"reason":"DNS endpoints changed"}` | `{}` when shutdown is requested |
 
-Successful operations return HTTP `200`. Malformed JSON, unknown fields and invalid
+Successful operations return HTTP `200`. JSON is decoded with Go 1.27’s `encoding/json/v2`: duplicate object names, invalid UTF-8 and trailing values are rejected. Malformed JSON, unknown fields and invalid
 task definitions return `400`; requests exceeding 1 MiB return `413`. Operations
 rejected by the lifecycle (including duplicate registration or startup failure)
 return `409`. These errors use `{"error":"explanation"}`. Unknown routes and

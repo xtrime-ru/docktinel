@@ -1,7 +1,6 @@
 package docktinel
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -62,9 +61,7 @@ func emergencyStop(dir string, container string, target Identity, now float64, g
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	path := filepath.Join(dir, "health-stop.json")
-	var record stopRecord
-	b, _ := os.ReadFile(path)
-	_ = json.Unmarshal(b, &record)
+	record, _ := readJSON[stopRecord](path)
 	if record.Container != container || record.Target != target || record.Started <= 0 {
 		record = stopRecord{Container: container, Target: target, Started: now}
 		if err := writeJSON(path, record); err != nil {
@@ -89,9 +86,7 @@ func Healthcheck(dir string, maxAge, stopGrace, missingGrace time.Duration, noKi
 	}
 	s, err := readStatus(dir)
 	if err != nil {
-		var identity stopRecord
-		b, _ := os.ReadFile(filepath.Join(dir, "identity.json"))
-		_ = json.Unmarshal(b, &identity)
+		identity, _ := readJSON[stopRecord](filepath.Join(dir, "identity.json"))
 		if identity.Container == container && sameProcess(identity.Target) {
 			if !noKill {
 				_ = emergencyStop(dir, container, identity.Target, now, stopGrace)
