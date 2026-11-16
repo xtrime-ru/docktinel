@@ -1,6 +1,6 @@
 # Docktinel
 
-A lightweight sentinel for Docker containers: startup checks, background jobs, process supervision, and a watchdog-aware Docker healthcheck. Written in Go, with no external dependencies and no configuration files.
+A lightweight sentinel for Docker containers: startup checks, background jobs, process supervision, and a watchdog-aware Docker healthcheck. Written in Go, with no external dependencies and optional JSON configuration.
 
 Docktinel coordinates work **inside one container**. Keep Docker's init (`--init` or Compose `init: true`) for signal forwarding and zombie reaping, and use Docker's restart policy to bring the container back.
 
@@ -51,6 +51,8 @@ curl http://127.0.0.1:8080
 ```
 
 See [the demo](examples/basic/README.md), [DNS/AdGuard integration](examples/adguard/README.md), and the [command reference](docs/commands.md).
+
+See [configuration and ENV](docs/configuration.md) for registering tasks from a file.
 
 ## Lifecycle
 

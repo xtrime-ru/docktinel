@@ -17,6 +17,8 @@ import (
 )
 
 type Config struct {
+	ConfigPath     string
+	ConfigRequired bool
 	Dir            string
 	Heartbeat      time.Duration
 	StartupTimeout time.Duration
@@ -85,6 +87,17 @@ func RunDaemon(cfg Config) error {
 		return err
 	}
 	defer d.cancel()
+	if cfg.ConfigPath != "" {
+		tasks, err := loadConfig(cfg.ConfigPath, cfg.ConfigRequired)
+		if err != nil {
+			return err
+		}
+		for _, task := range tasks {
+			if err := d.add(&task); err != nil {
+				return err
+			}
+		}
+	}
 	socket := filepath.Join(cfg.Dir, "control.sock")
 	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
 		return err

@@ -72,13 +72,15 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		fmt.Fprintln(out, version)
 		return nil
 	case "daemon":
+		config := f.String("config", "", "config file (DOCKTINEL_CONFIG or /etc/docktinel/config.json)")
 		heartbeat := f.Duration("heartbeat", 5*time.Second, "state publication interval")
 		startup := f.Duration("startup-timeout", 2*time.Minute, "overall deadline, including registration and after-start")
 		grace := f.Duration("stop-grace", 10*time.Second, "shutdown hook budget and application termination grace")
 		if err := parse(f, args); err != nil {
 			return err
 		}
-		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, StartupTimeout: *startup, StopGrace: *grace})
+		path, required := configPath(*config)
+		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, StartupTimeout: *startup, StopGrace: *grace, ConfigPath: path, ConfigRequired: required})
 	case "add":
 		return addCLI(args, dir, stderr)
 	case "startup":
@@ -174,27 +176,16 @@ func addCLI(args []string, dir string, stderr io.Writer) error {
 	if len(args) < 2 {
 		return errors.New("usage: docktinel add check|job|process NAME [OPTIONS] -- COMMAND [ARGS...]")
 	}
-	t := Task{Kind: args[0], Name: args[1]}
+	t := taskDefaults(args[0], args[1])
 	f := flag.NewFlagSet("docktinel add "+t.Kind+" "+t.Name, flag.ContinueOnError)
 	f.SetOutput(stderr)
-	f.StringVar(&t.Phase, "phase", "runtime", "startup, after-start, runtime, shutdown, or both")
-	interval := time.Duration(0)
-	timeout := time.Minute
-	failure := "degrade"
-	if t.Kind == "check" {
-		interval = 10 * time.Second
-		timeout = 5 * time.Second
-		failure = "restart-container"
-	}
-	if t.Kind == "process" {
-		timeout = 0
-	}
-	f.DurationVar(&t.Interval, "interval", interval, "check interval or delay after job completion; zero is one-shot")
-	f.DurationVar(&t.Timeout, "timeout", timeout, "execution timeout; zero is allowed only for processes")
+	f.StringVar(&t.Phase, "phase", t.Phase, "startup, after-start, runtime, shutdown, or both")
+	f.DurationVar(&t.Interval, "interval", t.Interval, "check interval or delay after job completion; zero is one-shot")
+	f.DurationVar(&t.Timeout, "timeout", t.Timeout, "execution timeout; zero is allowed only for processes")
 	f.DurationVar(&t.Deadline, "deadline", time.Minute, "overall retry budget for startup and after-start tasks")
 	f.DurationVar(&t.Grace, "grace", 0, "delay before first runtime execution")
 	f.IntVar(&t.Failures, "failures", 3, "consecutive failures before restarting the container")
-	f.StringVar(&t.Failure, "failure", failure, "degrade or restart-container")
+	f.StringVar(&t.Failure, "failure", t.Failure, "degrade or restart-container")
 	f.StringVar(&t.OnExit, "on-exit", "restart", "process action: restart or restart-container")
 	f.StringVar(&t.Lock, "lock", "", "serialize commands sharing this lock name (not checks)")
 	if err := f.Parse(args[2:]); err != nil {

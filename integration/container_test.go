@@ -33,7 +33,7 @@ type fixture struct {
 	id  string
 }
 
-func newFixture(t *testing.T, script string) *fixture {
+func newFixture(t *testing.T, script string, env ...string) *fixture {
 	t.Helper()
 	cli, err := client.New(client.FromEnv)
 	if err != nil {
@@ -44,7 +44,7 @@ func newFixture(t *testing.T, script string) *fixture {
 	if image == "" {
 		image = "docktinel-demo:local"
 	}
-	cfg := &container.Config{Image: image}
+	cfg := &container.Config{Image: image, Env: env}
 	if script != "" {
 		cfg.Entrypoint = []string{"sh", "-ec", script}
 		cfg.Cmd = []string{}
@@ -318,5 +318,40 @@ func TestFrozenWatchdogEscalatesTERMToKILL(t *testing.T) {
 	}, func(stopped bool) bool { return stopped })
 	if code := f.waitExit(); code != 137 {
 		t.Fatalf("expected KILL exit 137, got %d", code)
+	}
+}
+
+func TestConfigDuplicateWithAddFails(t *testing.T) {
+	f := newFixture(t, `
+		printf '%s' '{"tasks":[{"kind":"job","name":"one","command":["true"]}]}' > "/tmp/test-config.json"
+		docktinel daemon --config /tmp/test-config.json &
+		if docktinel add job one -- true; then exit 42; fi
+		docktinel startup
+		exec docktinel exec -- demo wait
+	`)
+	f.runtime()
+}
+
+func TestConfigErrorsPreventApplicationLaunch(t *testing.T) {
+	for _, config := range []string{
+		`{"tasks":[{"kind":"job","name":"x","command":["${DOCKTINEL_MISSING_TEST_ENV}"]}]}`,
+		`{"tasks":[],"unknown":true}`,
+	} {
+		t.Run(config, func(t *testing.T) {
+			f := newFixture(t, "printf '%s' '"+config+"' > \"/tmp/test-config.json\"\ndocktinel daemon --config /tmp/test-config.json")
+			if code := f.waitExit(); code == 0 {
+				t.Fatal("invalid config allowed successful startup")
+			}
+		})
+	}
+}
+
+func TestMissingExplicitConfigFailsStartup(t *testing.T) {
+	f := newFixture(t, `
+		export DOCKTINEL_CONFIG=/tmp/does-not-exist.json
+		docktinel daemon
+	`)
+	if code := f.waitExit(); code == 0 {
+		t.Fatal("missing explicit config did not fail startup")
 	}
 }
