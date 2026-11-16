@@ -505,7 +505,7 @@ func TestHelperRestartsWithoutRestartingContainer(t *testing.T) {
 	f := newFixture(t, `
 		docktinel daemon --heartbeat 100ms &
 		docktinel add process helper --failure restart-container --on-exit restart \
-			-- sh -c 'echo started >> /tmp/helper-starts'
+			-- sh -c 'echo started >> /tmp/helper-starts; if [ -e /tmp/helper-once ]; then exec sleep 600; fi; touch /tmp/helper-once'
 		exec docktinel startup --timeout 10s -- demo wait
 	`)
 	f.runtime()

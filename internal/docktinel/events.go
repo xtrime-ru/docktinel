@@ -37,6 +37,15 @@ func logLifecycle(from, to lifecycleState, reason string) {
 
 // Execution's transient running state must not flap health on every attempt.
 func taskHealth(s TaskStatus) string {
+	if s.Kind == "process" {
+		if s.Process != nil {
+			return "healthy"
+		}
+		if s.State == "restarting" || s.Failures > 0 {
+			return "degraded"
+		}
+		return "pending"
+	}
 	if s.Failures > 0 {
 		return "degraded"
 	}
@@ -48,9 +57,6 @@ func taskHealth(s TaskStatus) string {
 	}
 	if s.health != "" && s.health != "pending" {
 		return s.health
-	}
-	if s.Kind == "process" && s.Process != nil {
-		return "running"
 	}
 	return "pending"
 }

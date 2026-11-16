@@ -123,9 +123,19 @@ func (d *Daemon) attemptRun(parent context.Context, task Task) (elapsed time.Dur
 		}
 	})
 	defer func() {
+		if task.Kind == "process" && err == nil && parent.Err() == nil {
+			err = fmt.Errorf("process exited with status 0")
+		}
 		now, _ := uptime()
 		d.update(task.Name, func(s *TaskStatus) {
 			s.LastCompleted, s.Process, s.Due = now, nil, 0
+			if task.Kind == "process" {
+				s.State = "restarting"
+				if err != nil {
+					s.Reason = err.Error()
+				}
+				return
+			}
 			if err != nil {
 				s.Successes = 0
 				return
@@ -154,7 +164,14 @@ func (d *Daemon) attemptRun(parent context.Context, task Task) (elapsed time.Dur
 			return 0, ctx.Err()
 		}
 	}
-	return execute(ctx, task, func(p Identity) { d.update(task.Name, func(s *TaskStatus) { s.Process = &p }) })
+	return execute(ctx, task, func(p Identity) {
+		d.update(task.Name, func(s *TaskStatus) {
+			s.Process = &p
+			if task.Kind == "process" {
+				s.Failures, s.Reason = 0, ""
+			}
+		})
+	})
 }
 
 func (d *Daemon) markFailure(task Task, err error) int {
@@ -164,6 +181,9 @@ func (d *Daemon) markFailure(task Task, err error) int {
 		s.Successes = 0
 		count = s.Failures
 		s.State = "degraded"
+		if task.Kind == "process" {
+			s.State = "restarting"
+		}
 		s.Reason = err.Error()
 		s.Process = nil
 	})
