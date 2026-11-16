@@ -1,5 +1,12 @@
 # Docktinel
 
+<!-- Docktinel brand -->
+<p align="center">
+  <img src="assets/icon.svg" alt="Docktinel icon" width="112" align="middle">
+  <img src="assets/wordmark.svg" alt="Docktinel — a sentinel for Docker containers" width="560" align="middle">
+</p>
+<!-- /Docktinel brand -->
+
 A lightweight sentinel for Docker containers: startup checks, background jobs, helper process supervision, and a watchdog-aware healthcheck. Written in Go with no external runtime dependencies. Configure tasks with JSON or CLI commands.
 
 ## Contents
@@ -157,4 +164,6 @@ Source builds and tests require **Go 1.27+**. Docker builds include the toolchai
 
 ## License
 
-[MIT License](LICENSE).
+Docktinel is released under the [MIT License](LICENSE).
+
+The wordmark uses [Ubuntu Sans](https://github.com/canonical/Ubuntu-Sans-fonts), licensed under the [Ubuntu Font Licence 1.0](assets/Ubuntu-Font.txt).
