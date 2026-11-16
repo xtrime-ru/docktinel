@@ -13,6 +13,8 @@ docker run --rm --init -v "$PWD:/src" -w /src golang:1-trixie \
 
 Run `make integration` to build the artifact and example images, then test real process namespaces and signals. The tests create uniquely named containers, remove only those containers, and do not publish ports. Go 1.27+ and a running Docker Engine are required. The integration suite uses the official `github.com/moby/moby/client` SDK, pinned in `integration/go.mod`; these dependencies are not linked into Docktinel. The demo application and its probes are also written in Go.
 
+`make demo` builds the test environment with Docker Buildx; `DOCKTINEL_IMAGE` selects the binary image and `DEMO_BUILD_FLAGS` supplies optional builder, context or cache flags. CI uses the same Make target with its tested OCI artifact.
+
 `make integration-test` runs the suite against already-built images. The Make targets use `DOCKER_HOST` if set, otherwise derive the endpoint from the active Docker context. For a direct SDK test invocation, set `DOCKER_HOST` explicitly when using a non-default socket:
 
 ```sh

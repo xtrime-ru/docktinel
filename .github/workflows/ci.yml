@@ -18,21 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.x'
-          check-latest: true
-          # Formatting only; compilation caches are managed by Docker below.
-          cache: false
-      - name: Check formatting
-        run: test -z "$(gofmt -l cmd internal integration examples/basic)"
-
   build:
-    needs: prepare
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.image.outputs.name }}
@@ -41,6 +27,13 @@ jobs:
       stable: ${{ steps.release.outputs.stable }}
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.x'
+          check-latest: true
+          cache: false
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal integration examples/basic)"
       - uses: docker/setup-buildx-action@v4
       - name: Image name
         id: image
@@ -83,9 +76,7 @@ jobs:
           build-args: VERSION=${{ github.event.release.tag_name || github.ref_name }}
           # Re-run tests on every CI build; reuse their compiled test binaries.
           no-cache-filters: test
-          cache-from: |
-            type=gha,scope=docktinel
-            type=gha
+          cache-from: type=gha,scope=docktinel
           cache-to: type=gha,scope=docktinel,mode=max
           provenance: mode=max
           sbom: true
@@ -136,18 +127,23 @@ jobs:
           mkdir -p "$RUNNER_TEMP/docktinel-image"
           tar -xf "$RUNNER_TEMP/docktinel-image.tar" -C "$RUNNER_TEMP/docktinel-image"
       - uses: docker/setup-buildx-action@v4
-      - name: Build test environment from the image artifact
-        uses: docker/bake-action@v7
-        env:
-          DOCKTINEL_SOURCE: oci-layout://${{ runner.temp }}/docktinel-image
+        id: buildx
+      - name: Expose Buildx cache credentials
+        uses: actions/github-script@v9
         with:
-          source: .
-          allow: fs.read=${{ runner.temp }}/docktinel-image
-          targets: demo
-          load: true
-          set: |
-            demo.cache-from=type=gha,scope=docktinel-demo-${{ runner.arch }}
-            demo.cache-to=type=gha,scope=docktinel-demo-${{ runner.arch }},mode=max
+          script: |
+            core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN);
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL);
+      - name: Build test environment from the image artifact
+        run: make demo
+        env:
+          DOCKTINEL_IMAGE: docktinel-source
+          DEMO_BUILD_FLAGS: >-
+            --builder ${{ steps.buildx.outputs.name }}
+            --build-context docktinel-source=oci-layout://${{ runner.temp }}/docktinel-image
+            --cache-from type=gha,version=2,scope=docktinel-demo-${{ runner.arch }}
+            --cache-to type=gha,version=2,scope=docktinel-demo-${{ runner.arch }},mode=max
       - run: make integration-test
 
   publish:
