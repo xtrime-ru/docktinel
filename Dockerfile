@@ -3,11 +3,12 @@ ARG GO_VERSION=1.27.4
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 COPY go.mod ./
-COPY cmd ./cmd
 COPY internal ./internal
-RUN go test ./...
 ARG TARGETOS=linux
 ARG TARGETARCH
+# Cache libraries independently of the release version; link the binary once.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath ./internal/...
+COPY cmd ./cmd
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION}" -o /out/docktinel ./cmd/docktinel
