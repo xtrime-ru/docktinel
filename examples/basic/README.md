@@ -1,35 +1,57 @@
-# Runnable HTTP demo
+# HTTP example
 
-From the repository root:
+A small Go HTTP server demonstrates the full Docktinel lifecycle:
+
+1. A startup job creates the page.
+2. An after-start check waits for the HTTP listener.
+3. A runtime check probes the server every second.
+4. A maintenance job logs a message every 30 seconds.
+
+The [Dockerfile](Dockerfile) copies the Docktinel binary from an artifact image and starts it directly with `ENTRYPOINT`. Tasks are defined in [config.json](config.json); no shell entrypoint is needed.
+
+## Run
+
+From the repository root, with Docker installed:
 
 ```sh
-make demo
-docker compose -f examples/basic/compose.yml up -d --no-build
+docker compose -f examples/basic/compose.yml up -d --build
 curl http://127.0.0.1:8080
 docker compose -f examples/basic/compose.yml exec demo docktinel status
 ```
 
-The array-form Docker entrypoint runs `docktinel startup` directly. It auto-starts the daemon and loads `/etc/docktinel/config.json`, prepares a page, starts the HTTP server, waits for readiness, then checks it every second. A maintenance job logs a message every 30 seconds. Set `CHECK_INTERVAL` to change the check interval, `DEMO_MESSAGE` for the served text, and `DOCKTINEL_STARTUP_TIMEOUT` for the shared startup/readiness budget.
+The build copies Docktinel from `ghcr.io/xtrime-ru/docktinel:latest`. `make demo` builds the same demo image using that published binary by default; it does not build Docktinel from source.
 
-Simulate a critical failure:
+| ENV | Default | Purpose |
+| --- | --- | --- |
+| `DEMO_MESSAGE` | `Hello from Docktinel!` | Text written by the startup job |
+| `CHECK_INTERVAL` | `1s` | Runtime HTTP check interval |
+| `DOCKTINEL_STARTUP_TIMEOUT` | `30s` | Shared startup and readiness budget |
+
+Set overrides in the Compose service's `environment` section, then recreate the container. Values are applied at container startup.
+
+## Simulate failure and recovery
 
 ```sh
 docker compose -f examples/basic/compose.yml exec demo touch /srv/fail-health
 docker compose -f examples/basic/compose.yml logs -f
 ```
 
-Three failed checks terminate the server. Compose's restart policy starts it again. The marker survives a restart of the same container, so remove it to restore service:
+Three failed runtime checks stop the server; Compose restarts the container. The marker remains in the container's writable layer, so readiness fails on subsequent starts until it is removed:
 
 ```sh
 docker compose -f examples/basic/compose.yml exec demo rm -f /srv/fail-health
-# If the restart loop prevents exec, recreate the container instead:
+```
+
+If the restart loop prevents `exec`, recreate the container to clear the marker:
+
+```sh
 docker compose -f examples/basic/compose.yml up -d --force-recreate --no-build
 ```
 
-Clean up:
+## Clean up
 
 ```sh
 docker compose -f examples/basic/compose.yml down
 ```
 
-`make integration` uses isolated containers without published ports and tests critical failures, optional dependency recovery, and a frozen watchdog with TERM/KILL escalation.
+`make integration` tests isolated containers without published ports, including critical failure, optional dependency recovery and TERM/KILL escalation when the watchdog is frozen. See [Contributing](../../CONTRIBUTING.md) for test requirements.

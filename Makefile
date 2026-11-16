@@ -1,6 +1,7 @@
 GO ?= go
 VERSION ?= dev
 IMAGE ?= docktinel:local
+DOCKTINEL_IMAGE ?= ghcr.io/xtrime-ru/docktinel:latest
 
 .PHONY: build test image demo integration integration-test
 build:
@@ -13,10 +14,11 @@ test:
 image:
 	docker buildx build --load --build-arg VERSION=$(VERSION) -t $(IMAGE) .
 
-demo: image
-	docker build --builder "$$(docker context show)" --build-arg DOCKTINEL_IMAGE=$(IMAGE) -t docktinel-demo:local examples/basic
+demo:
+	docker build --builder "$$(docker context show)" --build-arg DOCKTINEL_IMAGE=$(DOCKTINEL_IMAGE) -t docktinel-demo:local examples/basic
 
-integration: demo
+integration: image
+	$(MAKE) demo DOCKTINEL_IMAGE=$(IMAGE)
 	$(MAKE) integration-test
 
 integration-test:

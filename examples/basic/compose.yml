@@ -4,7 +4,7 @@ services:
     build:
       context: .
       args:
-        DOCKTINEL_IMAGE: ${DOCKTINEL_IMAGE:-docktinel:local}
+        DOCKTINEL_IMAGE: ${DOCKTINEL_IMAGE:-ghcr.io/xtrime-ru/docktinel:latest}
     init: true
     restart: unless-stopped
     ports:

@@ -1,13 +1,13 @@
-ARG DOCKTINEL_IMAGE=docktinel:local
+ARG DOCKTINEL_IMAGE=ghcr.io/xtrime-ru/docktinel:latest
 ARG GO_VERSION=1.27.4
-FROM ${DOCKTINEL_IMAGE} AS sentinel
+FROM ${DOCKTINEL_IMAGE} AS docktinel
 FROM golang:${GO_VERSION}-bookworm AS demo-build
 WORKDIR /src
 COPY main.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/demo main.go
 
 FROM alpine:3.22
-COPY --from=sentinel /usr/local/bin/docktinel /usr/local/bin/docktinel
+COPY --from=docktinel /usr/local/bin/docktinel /usr/local/bin/docktinel
 COPY --from=demo-build /out/demo /usr/local/bin/demo
 WORKDIR /srv
 COPY config.json /etc/docktinel/config.json

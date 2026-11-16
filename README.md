@@ -22,11 +22,10 @@ A lightweight sentinel for Docker containers: startup checks, background jobs, h
 
 ## Quick start
 
-Try the runnable HTTP example with Docker and Make:
+Try the runnable HTTP example with Docker:
 
 ```sh
-make demo
-docker compose -f examples/basic/compose.yml up -d --no-build
+docker compose -f examples/basic/compose.yml up -d --build
 curl http://127.0.0.1:8080
 docker compose -f examples/basic/compose.yml exec demo docktinel status
 ```
@@ -38,7 +37,7 @@ The demo prepares a page, starts the server, waits for readiness, then runs heal
 Copy the static binary into an image that contains your application and check commands. Replace the base image, application, and helper below with your own:
 
 ```dockerfile
-FROM ghcr.io/xtrime-ru/docktinel:edge AS sentinel
+FROM ghcr.io/xtrime-ru/docktinel:latest AS sentinel
 FROM your-application:tag
 COPY --from=sentinel /usr/local/bin/docktinel /usr/local/bin/docktinel
 COPY docktinel.json /etc/docktinel/config.json
@@ -66,7 +65,7 @@ CMD ["application", "--foreground"]
 }
 ```
 
-`both` runs the check before launch and during runtime. Set `DEPENDENCY_HOST` in the container environment and run with Docker's init and a restart policy, as shown [below](#container-requirements). For deployments, pin a version or image digest instead of `edge`.
+`both` runs the check before launch and during runtime. Set `DEPENDENCY_HOST` in the container environment and run with Docker's init and a restart policy, as shown [below](#container-requirements). For deployments, pin a version or image digest instead of `latest`.
 
 ## Configure tasks
 
@@ -143,7 +142,7 @@ services:
 
 The minimal `scratch` image contains `/usr/local/bin/docktinel`, statically linked for `linux/amd64` and `linux/arm64`. Copy it into Alpine, Debian or scratch application images. Helper commands, shells and CA certificates come from your application image.
 
-Use `ghcr.io/xtrime-ru/docktinel:edge` or a published version tag. The [CI workflow](.github/workflows/ci.yml) defines publication and release tagging.
+Use `ghcr.io/xtrime-ru/docktinel:latest` or a published version tag. The [CI workflow](.github/workflows/ci.yml) defines publication and release tagging.
 
 ```sh
 make image                            # build and load docktinel:local
