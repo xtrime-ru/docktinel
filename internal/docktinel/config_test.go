@@ -194,3 +194,42 @@ func TestConfigRejectsInvalidUTF8FromENV(t *testing.T) {
 		t.Fatal("accepted invalid UTF-8 after ENV expansion")
 	}
 }
+
+func TestTypedConfigPreservesExplicitValues(t *testing.T) {
+	t.Setenv("TASK_KIND", "job")
+	t.Setenv("TASK_PHASE", "startup")
+	t.Setenv("TASK_TIMEOUT", "7s")
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"tasks":[{"kind":"${TASK_KIND}","name":"one","phase":"${TASK_PHASE}","command":["echo","$${LITERAL}"],"timeout":"${TASK_TIMEOUT}","interval":"0s","grace":"0s","failures":1,"failure":"restart-container","on_exit":"restart-container","lock":"state"},{"kind":"job","name":"two","command":["true"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := loadConfig(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := tasks[0]
+	if one.Kind != "job" || one.Phase != "startup" || one.Timeout != 7*time.Second || one.Interval != 0 || one.Failures != 1 || one.Failure != "restart-container" || one.OnExit != "restart-container" || one.Lock != "state" || one.Command[1] != "${LITERAL}" {
+		t.Fatalf("explicit configuration changed: %+v", one)
+	}
+	if &tasks[0].Env[0] != &tasks[1].Env[0] {
+		t.Fatal("file tasks duplicate the immutable environment")
+	}
+}
+
+func TestTypedConfigRejectsInvalidOptionalValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for _, extra := range []string{
+		`"timeout":null`, `"timeout":"0s"`, `"failures":0`, `"failures":null`,
+		`"phase":null`, `"on_exit":""`, `"deadline":"0s"`, `"grace":0`,
+		`"dir":"/tmp"`, `"env":[]`,
+	} {
+		body := `{"tasks":[{"kind":"job","name":"x","command":["true"],` + extra + `}]}`
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadConfig(path, true); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
+	}
+}

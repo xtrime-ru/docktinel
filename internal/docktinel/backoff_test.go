@@ -119,3 +119,15 @@ func TestExecutionFailureHasZeroLifetime(t *testing.T) {
 		t.Fatalf("failed exec has elapsed=%s, error=%v", elapsed, err)
 	}
 }
+
+func TestHeartbeatPublishesExpiredStartupAsStopping(t *testing.T) {
+	d := testDaemon(t)
+	d.status.StartupDeadline = 1
+	if err := d.heartbeat(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := readStatus(d.cfg.Dir)
+	if err != nil || s.Phase != "stopping" || s.State != "unhealthy" {
+		t.Fatalf("expired startup published the old state: %+v, %v", s, err)
+	}
+}

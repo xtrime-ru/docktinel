@@ -25,6 +25,56 @@ func configPath(flagPath string) (string, bool) {
 	return DefaultConfig, false
 }
 
+// Optional values retain the distinction between omission and explicit zero.
+// Decode nested values with the same JSON/ENV rules as the containing document.
+type configValue[T any] struct {
+	value T
+	set   bool
+}
+
+func (v *configValue[T]) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	v.set = true
+	return json.UnmarshalDecode(dec, &v.value)
+}
+
+func (v configValue[T]) apply(dst *T) {
+	if v.set {
+		*dst = v.value
+	}
+}
+
+type fileTask struct {
+	Kind      string                     `json:"kind"`
+	Name      string                     `json:"name"`
+	Command   []string                   `json:"command"`
+	Phase     configValue[string]        `json:"phase"`
+	Interval  configValue[time.Duration] `json:"interval"`
+	Timeout   configValue[time.Duration] `json:"timeout"`
+	Deadline  configValue[time.Duration] `json:"deadline"`
+	Grace     configValue[time.Duration] `json:"grace"`
+	Failures  configValue[int]           `json:"failures"`
+	Successes configValue[int]           `json:"successes"`
+	Failure   configValue[string]        `json:"failure"`
+	OnExit    configValue[string]        `json:"on_exit"`
+	Lock      configValue[string]        `json:"lock"`
+}
+
+func (f fileTask) task() Task {
+	t := taskDefaults(f.Kind, f.Name)
+	t.Command = f.Command
+	f.Phase.apply(&t.Phase)
+	f.Interval.apply(&t.Interval)
+	f.Timeout.apply(&t.Timeout)
+	f.Deadline.apply(&t.Deadline)
+	f.Grace.apply(&t.Grace)
+	f.Failures.apply(&t.Failures)
+	f.Successes.apply(&t.Successes)
+	f.Failure.apply(&t.Failure)
+	f.OnExit.apply(&t.OnExit)
+	f.Lock.apply(&t.Lock)
+	return t
+}
+
 func loadConfig(path string, required bool) ([]Task, error) {
 	f, err := os.Open(path)
 	if !required && errors.Is(err, os.ErrNotExist) {
@@ -39,9 +89,9 @@ func loadConfig(path string, required bool) ([]Task, error) {
 		return nil, err
 	}
 	var doc *struct {
-		Tasks []jsontext.Value `json:"tasks"`
+		Tasks []fileTask `json:"tasks"`
 	}
-	if err := json.Unmarshal(data, &doc, json.RejectUnknownMembers(true)); err != nil {
+	if err := json.Unmarshal(data, &doc, configUnmarshalers, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	if doc == nil {
@@ -51,41 +101,30 @@ func loadConfig(path string, required bool) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	env := os.Environ()
 	tasks := make([]Task, 0, len(doc.Tasks))
-	seen := make(map[string]bool)
+	seen := make(map[string]bool, len(doc.Tasks))
 	for i, entry := range doc.Tasks {
-		t, err := decodeConfigTask(entry)
-		if err != nil {
+		t := entry.task()
+		if err := t.Validate(); err != nil {
 			return nil, fmt.Errorf("config task %d: %w", i+1, err)
 		}
 		if seen[t.Name] {
 			return nil, fmt.Errorf("duplicate config task %q", t.Name)
 		}
 		seen[t.Name] = true
-		t.Env, t.Dir = os.Environ(), cwd
+		t.Env, t.Dir = env, cwd
 		tasks = append(tasks, t)
 	}
 	return tasks, nil
 }
 
 func decodeConfigTask(data []byte) (Task, error) {
-	// Decode only the discriminator first so defaults are shared with add.
-	// Keep raw JSON values intact: decoding through any would round integers.
-	var header struct {
-		Kind string         `json:"kind"`
-		Env  jsontext.Value `json:"env"`
-		Dir  jsontext.Value `json:"dir"`
-	}
-	if err := json.Unmarshal(data, &header, configUnmarshalers); err != nil {
+	var spec fileTask
+	if err := json.Unmarshal(data, &spec, configUnmarshalers, json.RejectUnknownMembers(true)); err != nil {
 		return Task{}, err
 	}
-	if header.Env != nil || header.Dir != nil {
-		return Task{}, errors.New("env and dir are inherited from the daemon, not config properties")
-	}
-	t := taskDefaults(header.Kind, "")
-	if err := json.Unmarshal(data, &t, configUnmarshalers, json.RejectUnknownMembers(true)); err != nil {
-		return Task{}, err
-	}
+	t := spec.task()
 	return t, t.Validate()
 }
 
@@ -123,6 +162,9 @@ var configUnmarshalers = json.WithUnmarshalers(json.JoinUnmarshalers(
 // Expand only ${VAR} and ${VAR:-default}; $$ escapes a literal dollar sign.
 // Bare $VAR is left alone, useful for explicitly configured shell commands.
 func expandEnv(value string) (string, error) {
+	if !strings.Contains(value, "$") {
+		return value, nil
+	}
 	var out strings.Builder
 	for i := 0; i < len(value); {
 		if strings.HasPrefix(value[i:], "$$") {

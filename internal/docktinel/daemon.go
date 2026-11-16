@@ -145,11 +145,7 @@ func RunDaemon(cfg Config) error {
 		case <-d.done:
 			return nil
 		case <-ticker.C:
-			s := d.snapshot()
-			if s.State == "starting" && s.Heartbeat > s.StartupDeadline {
-				d.stop("startup deadline exceeded", true)
-			}
-			if err := d.publish(); err != nil {
+			if err := d.heartbeat(); err != nil {
 				slog.Error("cannot publish state", "error", err)
 				d.stop("cannot publish state", true)
 			}
@@ -158,18 +154,34 @@ func RunDaemon(cfg Config) error {
 }
 
 func (d *Daemon) snapshot() Status {
+	// Capture time before state; avoid filesystem reads/formatting under mu.
+	now, _ := uptime()
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	s := d.status
-	s.Heartbeat, _ = uptime()
-	s.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.Tasks = make([]TaskStatus, 0, len(d.tasks))
 	for _, task := range d.tasks {
 		t := d.states[task.Name]
 		s.Tasks = append(s.Tasks, t)
 	}
 	s.State = d.lifecycleLocked().state
+	d.mu.Unlock()
+	s.Heartbeat, s.UpdatedAt = now, updatedAt
 	return s
+}
+
+func (d *Daemon) heartbeat() error {
+	// Keep snapshot creation and publication ordered with lifecycle updates.
+	d.publishMu.Lock()
+	s := d.snapshot()
+	if s.State == "starting" && s.Heartbeat > s.StartupDeadline {
+		d.publishMu.Unlock()
+		// stop publishes the new stopping state using the same publication lock.
+		d.stop("startup deadline exceeded", true)
+		return nil
+	}
+	defer d.publishMu.Unlock()
+	return writeJSON(filepath.Join(d.cfg.Dir, "status.json"), s)
 }
 
 func (d *Daemon) publish() error {
