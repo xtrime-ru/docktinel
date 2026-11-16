@@ -27,7 +27,7 @@ Usage: docktinel [--runtime-dir DIR] COMMAND
   healthcheck  Report health; stop the application if the watchdog is stuck
   version      Show build version
 
-Use COMMAND --help for command options. Runtime directory defaults to
+Use COMMAND --help or help COMMAND for command options. Runtime directory defaults to
 DOCKTINEL_RUNTIME_DIR or /run/docktinel. Only startup/exec auto-start a daemon,
 and require a config for that. Without a config, start daemon explicitly and
 register tasks with add. Requires Linux and Docker --init.
@@ -37,7 +37,8 @@ func splitFields(s string) []string { return strings.Fields(s) }
 
 func CLI(args []string, out, stderr io.Writer, version string) int {
 	root := flag.NewFlagSet("docktinel", flag.ContinueOnError)
-	root.SetOutput(stderr)
+	root.SetOutput(io.Discard)
+	root.Usage = func() {}
 	defaultDir := os.Getenv("DOCKTINEL_RUNTIME_DIR")
 	if defaultDir == "" {
 		defaultDir = DefaultDir
@@ -48,10 +49,20 @@ func CLI(args []string, out, stderr io.Writer, version string) int {
 			fmt.Fprint(out, Help)
 			return 0
 		}
+		printCLIError(stderr, &usageError{err, "docktinel", "[--runtime-dir DIR] COMMAND"})
 		return 1
 	}
 	args = root.Args()
-	if len(args) == 0 || args[0] == "help" {
+	if len(args) > 0 && args[0] == "help" {
+		args = args[1:]
+		if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+			args = nil
+		}
+		if len(args) > 0 {
+			args = append(args, "--help")
+		}
+	}
+	if len(args) == 0 {
 		fmt.Fprint(out, Help)
 		return 0
 	}
@@ -60,17 +71,20 @@ func CLI(args []string, out, stderr io.Writer, version string) int {
 		return 0
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "docktinel:", err)
+		printCLIError(stderr, err)
 		return 1
 	}
 	return 0
 }
 
 func command(name string, args []string, dir string, out, stderr io.Writer, version string) error {
-	f := flag.NewFlagSet("docktinel "+name, flag.ContinueOnError)
-	f.SetOutput(stderr)
+	u := cliCommandHelp(name, out)
+	f := u.flags
 	switch name {
 	case "version":
+		if err := u.parse(args, false); err != nil {
+			return err
+		}
 		fmt.Fprintln(out, version)
 		return nil
 	case "daemon":
@@ -78,18 +92,18 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		config := f.String("config", "", "config file (DOCKTINEL_CONFIG or /etc/docktinel/config.json)")
 		mainPID := f.Int("main-pid", 0, "entrypoint PID (internal auto-start option)")
 		grace := f.Duration("stop-grace", 10*time.Second, "shutdown hook budget and application termination grace")
-		if err := parse(f, args); err != nil {
+		if err := u.parse(args, false); err != nil {
 			return err
 		}
 		path, required := configPath(*config)
 		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, RegistrationTimeout: time.Minute,
 			StopGrace: *grace, ConfigPath: path, ConfigRequired: required, MainPID: *mainPID})
 	case "add":
-		return addCLI(args, dir, stderr)
+		return addCLI(args, dir, out)
 	case "startup", "exec":
 		// Parse CLI before ENV so an explicit flag also overrides invalid ENV.
 		timeout := f.Duration("timeout", 2*time.Minute, "overall startup and after-start readiness budget")
-		if err := f.Parse(args); err != nil {
+		if err := u.parse(args, true); err != nil {
 			return err
 		}
 		explicit := false
@@ -106,7 +120,7 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 			*timeout = value
 		}
 		if *timeout <= 0 {
-			return errors.New("timeout must be positive")
+			return u.invalid(errors.New("timeout must be positive"))
 		}
 		argv := f.Args()
 		var path string
@@ -149,13 +163,16 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		return syscall.Exec(path, argv, os.Environ())
 	case "restart":
 		reason := f.String("reason", "", "required explanation for the planned restart")
-		if err := parse(f, args); err != nil {
+		if err := u.parse(args, false); err != nil {
 			return err
+		}
+		if *reason == "" {
+			return u.invalid(errors.New("required flag --reason is missing or empty"))
 		}
 		return callAPI(dir, "POST", "/v1/restart", restartRequest{Reason: *reason}, nil, 5*time.Second)
 	case "status":
 		asJSON := f.Bool("json", false, "print JSON status")
-		if err := parse(f, args); err != nil {
+		if err := u.parse(args, false); err != nil {
 			return err
 		}
 		var s Status
@@ -176,11 +193,11 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		grace := f.Duration("stop-grace", 10*time.Second, "time from emergency TERM to KILL across invocations")
 		missing := f.Duration("startup-grace", 2*time.Minute, "allow missing status during initial container startup")
 		noKill := f.Bool("no-kill", false, "diagnose without signalling the application")
-		if err := parse(f, args); err != nil {
+		if err := u.parse(args, false); err != nil {
 			return err
 		}
 		if *maxAge <= 0 || *grace <= 0 || *missing < 0 {
-			return errors.New("max-age and stop-grace must be positive; startup-grace must be nonnegative")
+			return u.invalid(errors.New("max-age and stop-grace must be positive; startup-grace must be nonnegative"))
 		}
 		if err := Healthcheck(dir, *maxAge, *grace, *missing, *noKill); err != nil {
 			return err
@@ -188,32 +205,27 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		fmt.Fprintln(out, "healthy")
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q; use docktinel --help", name)
+		return &usageError{fmt.Errorf("unknown command %q", name), "docktinel", "[--runtime-dir DIR] COMMAND"}
 	}
 }
 
-func parse(f *flag.FlagSet, args []string) error {
-	if err := f.Parse(args); err != nil {
-		return err
-	}
-	if f.NArg() != 0 {
-		return fmt.Errorf("unexpected argument %q", f.Arg(0))
-	}
-	return nil
-}
-
-func addCLI(args []string, dir string, stderr io.Writer) error {
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stderr, "Usage: docktinel add check|job|process NAME [OPTIONS] -- COMMAND [ARGS...]")
-		fmt.Fprintln(stderr, "Use add check NAME --help (or job/process) to see task options.")
+func addCLI(args []string, dir string, out io.Writer) error {
+	if len(args) == 0 || (len(args) == 1 && (args[0] == "--help" || args[0] == "-h")) {
+		fmt.Fprint(out, addHelp)
 		return flag.ErrHelp
 	}
-	if len(args) < 2 {
-		return errors.New("usage: docktinel add check|job|process NAME [OPTIONS] -- COMMAND [ARGS...]")
+	kind := args[0]
+	if kind != "check" && kind != "job" && kind != "process" {
+		return &usageError{fmt.Errorf("unknown task kind %q", kind), "docktinel add", "COMMAND"}
 	}
-	t := taskDefaults(args[0], args[1])
-	f := flag.NewFlagSet("docktinel add "+t.Kind+" "+t.Name, flag.ContinueOnError)
-	f.SetOutput(stderr)
+	name := ""
+	rest := args[1:]
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		name, rest = rest[0], rest[1:]
+	}
+	t := taskDefaults(kind, name)
+	u := newCLIUsage("docktinel add "+kind, "NAME [OPTIONS] -- COMMAND [ARG...]", "Register a "+kind+" task before startup.", out)
+	f := u.flags
 	f.StringVar(&t.Phase, "phase", t.Phase, "startup, after-start, runtime, shutdown, or both")
 	f.DurationVar(&t.Interval, "interval", t.Interval, "check interval or delay after job completion; zero is one-shot")
 	f.DurationVar(&t.Timeout, "timeout", t.Timeout, "execution timeout; zero is allowed only for processes")
@@ -223,12 +235,15 @@ func addCLI(args []string, dir string, stderr io.Writer) error {
 	f.StringVar(&t.Failure, "failure", t.Failure, "degrade or restart-container")
 	f.StringVar(&t.OnExit, "on-exit", "restart", "process action: restart or restart-container")
 	f.StringVar(&t.Lock, "lock", "", "serialize commands sharing this lock name (not checks)")
-	if err := f.Parse(args[2:]); err != nil {
+	if err := u.parse(rest, true); err != nil {
 		return err
 	}
 	t.Command = f.Args()
+	if t.Name == "" {
+		return u.invalid(errors.New("task NAME is required"))
+	}
 	if err := t.Validate(); err != nil {
-		return err
+		return u.invalid(err)
 	}
 	t.Env = os.Environ()
 	var err error
