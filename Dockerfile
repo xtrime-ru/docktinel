@@ -1,13 +1,24 @@
 # syntax=docker/dockerfile:1
-ARG GO_VERSION=1.27.4
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
+ARG GO_VERSION=1
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS source
 WORKDIR /src
 COPY go.mod ./
 COPY internal ./internal
+
+# Cache test compilation separately from execution and production compilation.
+FROM source AS test-build
+COPY cmd ./cmd
+RUN go test -race -run '^$' ./...
+
+FROM test-build AS test
+RUN go test -race -count=1 ./... && go vet ./... && printf 'ok\n' > /test-passed
+
+FROM source AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
-# Cache libraries independently of the release version; link the binary once.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath ./internal/...
+# Require successful tests without inheriting the test stage filesystem.
+RUN --mount=type=bind,from=test,source=/test-passed,target=/test-passed \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath ./internal/...
 COPY cmd ./cmd
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \

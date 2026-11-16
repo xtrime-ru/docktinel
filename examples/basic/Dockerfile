@@ -1,5 +1,5 @@
 ARG DOCKTINEL_IMAGE=ghcr.io/xtrime-ru/docktinel:latest
-ARG GO_VERSION=1.27.4
+ARG GO_VERSION=1
 FROM ${DOCKTINEL_IMAGE} AS docktinel
 FROM golang:${GO_VERSION}-bookworm AS demo-build
 WORKDIR /src
