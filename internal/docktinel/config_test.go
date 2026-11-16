@@ -2,8 +2,10 @@ package docktinel
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,5 +104,68 @@ func TestConfigPathPrecedence(t *testing.T) {
 	}
 	if path, required := configPath("/flag/config.json"); path != "/flag/config.json" || !required {
 		t.Fatal(path, required)
+	}
+}
+
+func TestStartupBudgetResetsRegistrationDeadline(t *testing.T) {
+	d := testDaemon(t)
+	before := d.snapshot().StartupDeadline
+	if err := d.startup(20 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	s := d.snapshot()
+	if s.StartupDeadline >= before || s.StartupDeadline-s.Heartbeat > 20.1 {
+		t.Fatal(s)
+	}
+}
+
+func TestGlobalStartupBudgetBoundsOptionalTask(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("slow", "job", "sleep 5")
+	task.Phase = "startup"
+	task.Timeout, task.Deadline = 10*time.Second, 10*time.Second
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := d.startup(100 * time.Millisecond); err == nil {
+		t.Fatal("global deadline was ignored for optional task")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("global deadline did not bound execution")
+	}
+}
+
+func TestStartupHelpAndInvalidENV(t *testing.T) {
+	t.Setenv("DOCKTINEL_STARTUP_TIMEOUT", "invalid")
+	for _, name := range []string{"startup"} {
+		var out, stderr bytes.Buffer
+		if CLI([]string{name, "--help"}, &out, &stderr, "test") != 0 {
+			t.Fatal(stderr.String())
+		}
+		stderr.Reset()
+		if CLI([]string{name}, &out, &stderr, "test") == 0 || !strings.Contains(stderr.String(), "DOCKTINEL_STARTUP_TIMEOUT") {
+			t.Fatal(stderr.String())
+		}
+		stderr.Reset()
+		// An explicit timeout overrides invalid ENV and validates before launch.
+		if CLI([]string{name, "--timeout", "0s"}, &out, &stderr, "test") == 0 || strings.Contains(stderr.String(), "DOCKTINEL_STARTUP_TIMEOUT") {
+			t.Fatal(stderr.String())
+		}
+	}
+}
+
+func TestAfterStartSharesOriginalBudget(t *testing.T) {
+	d := testDaemon(t)
+	task := testTask("ready", "check", "sleep 5")
+	task.Phase = "after-start"
+	if err := d.add(&task); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startup(100 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.runPhase("after-start", d.tasks); err != context.DeadlineExceeded {
+		t.Fatalf("got %v", err)
 	}
 }

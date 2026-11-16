@@ -116,3 +116,7 @@ type apiError struct {
 type restartRequest struct {
 	Reason string `json:"reason"`
 }
+
+type startupRequest struct {
+	Timeout time.Duration `json:"timeout"`
+}

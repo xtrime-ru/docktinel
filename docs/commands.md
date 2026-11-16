@@ -10,15 +10,15 @@ Global flags come before the command. Flags for `add` come after the task kind a
 
 | Command | Options and defaults |
 | --- | --- |
-| `daemon` | `--heartbeat 5s`, `--startup-timeout 2m`, `--stop-grace 10s` |
-| `startup` | `--timeout 15m` (client wait only) |
+| `daemon` | `--heartbeat 5s`, `--stop-grace 10s` |
+| `startup` | `--timeout 2m` (shared startup and after-start budget) |
 | `exec -- COMMAND ARGS...` | Register and replace the entrypoint process |
 | `restart --reason TEXT` | Cancel work, run shutdown jobs, terminate the application |
 | `status` | `--json` for machine-readable output |
 | `healthcheck` | `--max-age 30s`, `--stop-grace 10s`, `--startup-grace 2m`, `--no-kill` |
 | `version` | Build version |
 
-`daemon` stays in the foreground; start it with `&` in an entrypoint. Minimum heartbeat is 100ms. The global startup deadline includes registration, startup tasks, the wait for `exec`, and after-start tasks. Extend it if the sum of task deadlines can exceed two minutes.
+`daemon` stays in the foreground; start it with `&` in an entrypoint. Minimum heartbeat is 100ms. Registration has a one-minute budget. `startup --timeout` sets one shared deadline for startup tasks, waiting for main attachment, and after-start readiness. The default is two minutes; `DOCKTINEL_STARTUP_TIMEOUT` overrides the default and an explicit CLI flag overrides ENV.
 
 The daemon's stop grace is the budget for shutdown jobs together, followed by a separate application TERM grace of the same duration. Task cancellation may take another two seconds. Choose Docker's `stop_grace_period` to match your shutdown requirements. Docker healthcheck escalation has its own grace and runs across invocations, without blocking a single probe.
 

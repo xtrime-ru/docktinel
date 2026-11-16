@@ -33,11 +33,16 @@ func (d *Daemon) controlServer() *http.Server {
 		finishAPI(w, d.add(&task))
 	})
 	mux.HandleFunc("POST /v1/startup", func(w http.ResponseWriter, r *http.Request) {
-		if !decodeAPI(w, r, &struct{}{}) {
+		req := startupRequest{Timeout: 2 * time.Minute}
+		if !decodeAPI(w, r, &req) {
 			return
 		}
-		// Client cancellation does not cancel container startup.
-		finishAPI(w, d.startup())
+		if req.Timeout <= 0 {
+			writeAPI(w, http.StatusBadRequest, apiError{"startup timeout must be positive"})
+			return
+		}
+		// The daemon enforces this budget even if the client disconnects.
+		finishAPI(w, d.startup(req.Timeout))
 	})
 	mux.HandleFunc("POST /v1/main", func(w http.ResponseWriter, r *http.Request) {
 		var main Identity

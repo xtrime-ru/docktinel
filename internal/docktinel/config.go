@@ -24,6 +24,18 @@ func configPath(flagPath string) (string, bool) {
 	return DefaultConfig, false
 }
 
+func envDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value, present := os.LookupEnv(name)
+	if !present {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
+	}
+	return d, nil
+}
+
 func taskDefaults(kind, name string) Task {
 	t := Task{Name: name, Kind: kind, Phase: "runtime", Timeout: time.Minute, Deadline: time.Minute,
 		Failures: 3, Failure: "degrade", OnExit: "restart"}

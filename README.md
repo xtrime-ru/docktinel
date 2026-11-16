@@ -27,7 +27,7 @@ CMD ["your-application", "--foreground"]
 #!/bin/sh
 set -eu
 
-docktinel daemon --startup-timeout 2m &
+docktinel daemon &
 
 # Existing commands/scripts define what ready and healthy mean.
 docktinel add check dependency --phase both --deadline 1m \
@@ -36,7 +36,7 @@ docktinel add check dependency --phase both --deadline 1m \
 docktinel add job refresh --interval 1m --timeout 20s \
     -- /usr/local/bin/refresh-state
 
-docktinel startup
+docktinel startup --timeout 2m
 exec docktinel exec -- "$@"
 ```
 

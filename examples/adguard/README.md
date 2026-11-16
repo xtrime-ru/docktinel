@@ -6,7 +6,7 @@ This is a registration recipe for an existing image, not a standalone AdGuard di
 #!/bin/sh
 set -eu
 
-docktinel daemon --startup-timeout 2m &
+docktinel daemon &
 
 # Resolve dynamic upstream endpoints before launching AdGuard. Retry for at
 # most a minute; do not block startup indefinitely on optional upstreams.
@@ -25,7 +25,7 @@ docktinel add check dns-serving --interval 5s --timeout 5s --failures 3 \
 docktinel add job dns-refresh --interval 30s --timeout 10s --lock dns-state \
     -- /opt/bin/update-dns-endpoints
 
-docktinel startup
+docktinel startup --timeout 2m
 exec docktinel exec -- /opt/AdGuardHome/AdGuardHome --no-check-update \
     -c /opt/adguardhome/conf/AdGuardHome.yaml -w /opt/adguardhome/work
 ```

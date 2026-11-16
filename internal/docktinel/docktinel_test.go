@@ -22,7 +22,7 @@ func testDaemon(t *testing.T) *Daemon {
 	if _, err := uptime(); err != nil {
 		t.Skip("Linux integration test")
 	}
-	d, err := newDaemon(Config{Dir: t.TempDir(), Heartbeat: time.Second, StartupTimeout: time.Minute, StopGrace: 100 * time.Millisecond})
+	d, err := newDaemon(Config{Dir: t.TempDir(), Heartbeat: time.Second, RegistrationTimeout: time.Minute, StopGrace: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestRegistrationAndStartupRetry(t *testing.T) {
 	if d.add(&task) == nil {
 		t.Fatal("duplicate task accepted")
 	}
-	if err := d.startup(); err != nil {
+	if err := d.startup(2 * time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if d.snapshot().Phase != "awaiting-main" || d.snapshot().Tasks[0].State != "healthy" {
@@ -113,7 +113,7 @@ func TestRegistrationAndStartupRetry(t *testing.T) {
 	if d.add(&task) == nil {
 		t.Fatal("late registration accepted")
 	}
-	if d.startup() == nil {
+	if d.startup(2*time.Minute) == nil {
 		t.Fatal("duplicate startup accepted")
 	}
 }
@@ -126,7 +126,7 @@ func TestStartupDependencyCanDegrade(t *testing.T) {
 	if err := d.add(&task); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.startup(); err != nil {
+	if err := d.startup(2 * time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if d.snapshot().Tasks[0].State != "degraded" {

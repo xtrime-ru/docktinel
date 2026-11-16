@@ -74,24 +74,37 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 	case "daemon":
 		config := f.String("config", "", "config file (DOCKTINEL_CONFIG or /etc/docktinel/config.json)")
 		heartbeat := f.Duration("heartbeat", 5*time.Second, "state publication interval")
-		startup := f.Duration("startup-timeout", 2*time.Minute, "overall deadline, including registration and after-start")
 		grace := f.Duration("stop-grace", 10*time.Second, "shutdown hook budget and application termination grace")
 		if err := parse(f, args); err != nil {
 			return err
 		}
 		path, required := configPath(*config)
-		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, StartupTimeout: *startup, StopGrace: *grace, ConfigPath: path, ConfigRequired: required})
+		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, RegistrationTimeout: time.Minute, StopGrace: *grace, ConfigPath: path, ConfigRequired: required})
 	case "add":
 		return addCLI(args, dir, stderr)
 	case "startup":
-		timeout := f.Duration("timeout", 15*time.Minute, "maximum time for this client to wait; daemon keeps its own deadline")
+		// Parse CLI before ENV so an explicit flag also overrides invalid ENV.
+		timeout := f.Duration("timeout", 2*time.Minute, "overall startup and after-start readiness budget")
 		if err := parse(f, args); err != nil {
 			return err
+		}
+		explicit := false
+		f.Visit(func(v *flag.Flag) {
+			if v.Name == "timeout" {
+				explicit = true
+			}
+		})
+		if !explicit {
+			value, err := envDuration("DOCKTINEL_STARTUP_TIMEOUT", 2*time.Minute)
+			if err != nil {
+				return err
+			}
+			*timeout = value
 		}
 		if *timeout <= 0 {
 			return errors.New("timeout must be positive")
 		}
-		return callAPI(dir, "POST", "/v1/startup", nil, nil, *timeout)
+		return callAPI(dir, "POST", "/v1/startup", startupRequest{Timeout: *timeout}, nil, *timeout+5*time.Second)
 	case "exec":
 		if err := f.Parse(args); err != nil {
 			return err

@@ -49,10 +49,11 @@ must remain unique; registration closes when startup begins.
 | --- | --- | --- |
 | `DOCKTINEL_CONFIG` | `/etc/docktinel/config.json` | Config file loaded by daemon |
 | `DOCKTINEL_RUNTIME_DIR` | `/run/docktinel` | Socket, status, and locks |
+| `DOCKTINEL_STARTUP_TIMEOUT` | `2m` | Shared startup and after-start budget |
 
 Explicit CLI flags override ENV, which overrides defaults. `--config` belongs
 to `daemon`. Set the same runtime directory for all CLI invocations and Docker
-healthcheck. Start the daemon explicitly before calling `add` or `startup`.
+healthcheck. Start the daemon explicitly before calling `add` or `startup`. `startup --timeout` overrides the timeout ENV setting. Startup and after-start readiness share the same deadline; attaching the main process does not reset it.
 
 ## ENV substitution
 

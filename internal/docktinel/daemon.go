@@ -17,12 +17,12 @@ import (
 )
 
 type Config struct {
-	ConfigPath     string
-	ConfigRequired bool
-	Dir            string
-	Heartbeat      time.Duration
-	StartupTimeout time.Duration
-	StopGrace      time.Duration
+	Dir                 string
+	Heartbeat           time.Duration
+	RegistrationTimeout time.Duration
+	ConfigPath          string
+	ConfigRequired      bool
+	StopGrace           time.Duration
 }
 
 type Daemon struct {
@@ -62,13 +62,13 @@ func newDaemon(cfg Config) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{cfg: cfg, states: map[string]TaskStatus{}, locks: map[string]chan struct{}{}, ctx: ctx, cancel: cancel, done: make(chan struct{}), status: Status{
 		Version: 1, Instance: uuid.New().String(), Container: container, Daemon: self, Main: main,
-		Phase: "configuring", State: "starting", StartupDeadline: now + cfg.StartupTimeout.Seconds(),
+		Phase: "configuring", State: "starting", StartupDeadline: now + cfg.RegistrationTimeout.Seconds(),
 	}}, nil
 }
 
 func RunDaemon(cfg Config) error {
-	if cfg.Heartbeat < 100*time.Millisecond || cfg.StartupTimeout <= 0 || cfg.StopGrace <= 0 {
-		return errors.New("heartbeat must be at least 100ms; startup-timeout and stop-grace must be positive")
+	if cfg.Heartbeat < 100*time.Millisecond || cfg.RegistrationTimeout <= 0 || cfg.StopGrace <= 0 {
+		return errors.New("heartbeat must be at least 100ms; registration-timeout and stop-grace must be positive")
 	}
 	if err := os.MkdirAll(cfg.Dir, 0700); err != nil {
 		return err
@@ -201,12 +201,23 @@ func (d *Daemon) add(task *Task) error {
 	return nil
 }
 
-func (d *Daemon) startup() error {
+func (d *Daemon) startup(budget time.Duration) error {
+	if budget <= 0 {
+		return errors.New("startup timeout must be positive")
+	}
+
 	d.mu.Lock()
 	if d.status.Phase != "configuring" {
 		d.mu.Unlock()
 		return errors.New("startup has already been requested")
 	}
+	now, _ := uptime()
+	if d.status.StartupDeadline > 0 && now > d.status.StartupDeadline {
+		d.mu.Unlock()
+		d.stop("registration deadline exceeded", true)
+		return errors.New("registration deadline exceeded")
+	}
+	d.status.StartupDeadline = now + budget.Seconds()
 	d.status.Phase = "startup"
 	d.workers.Add(1)
 	tasks := slices.Clone(d.tasks)
@@ -236,6 +247,12 @@ func (d *Daemon) attach(main *Identity) error {
 	if *main != d.status.Main {
 		d.mu.Unlock()
 		return errors.New("exec must replace the entrypoint: use exec docktinel exec -- COMMAND")
+	}
+	now, _ := uptime()
+	if now > d.status.StartupDeadline {
+		d.mu.Unlock()
+		d.stop("startup deadline exceeded", true)
+		return errors.New("startup deadline exceeded")
 	}
 	d.status.Main = *main
 	d.status.Phase = "after-start"
@@ -269,6 +286,15 @@ func (d *Daemon) attach(main *Identity) error {
 }
 
 func (d *Daemon) runPhase(phase string, tasks []Task) error {
+	d.mu.Lock()
+	deadline := d.status.StartupDeadline
+	d.mu.Unlock()
+	now, err := uptime()
+	if err != nil {
+		return err
+	}
+	phaseCtx, phaseCancel := context.WithTimeout(d.ctx, time.Duration((deadline-now)*float64(time.Second)))
+	defer phaseCancel()
 	for _, task := range tasks {
 		if task.Phase != phase && !(phase == "startup" && task.Phase == "both") {
 			continue
@@ -277,7 +303,7 @@ func (d *Daemon) runPhase(phase string, tasks []Task) error {
 			d.launch(task)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(d.ctx, task.Deadline)
+		ctx, cancel := context.WithTimeout(phaseCtx, task.Deadline)
 		var err error
 		for {
 			err = d.attempt(ctx, task)
@@ -293,6 +319,9 @@ func (d *Daemon) runPhase(phase string, tasks []Task) error {
 			}
 		}
 		cancel()
+		if phaseCtx.Err() != nil {
+			return phaseCtx.Err()
+		}
 		if d.ctx.Err() != nil {
 			return d.ctx.Err()
 		}
@@ -303,7 +332,7 @@ func (d *Daemon) runPhase(phase string, tasks []Task) error {
 			}
 		}
 	}
-	return nil
+	return phaseCtx.Err()
 }
 
 func (d *Daemon) update(name string, fn func(*TaskStatus)) {

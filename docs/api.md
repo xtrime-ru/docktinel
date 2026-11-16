@@ -10,7 +10,7 @@ application. Keep the runtime directory private and inside the container.
 | --- | --- | --- | --- |
 | `GET` | `/v1/status` | None | Current status object, matching `docktinel status --json` |
 | `POST` | `/v1/tasks` | Task object | `{}` after registration |
-| `POST` | `/v1/startup` | `{}` | `{}` when startup finishes |
+| `POST` | `/v1/startup` | `{"timeout":30000000000}` (optional; default 2m) | `{}` when startup finishes |
 | `POST` | `/v1/main` | `{"pid":123,"start":"456"}` | `{}` after attaching the entrypoint |
 | `POST` | `/v1/restart` | `{"reason":"DNS endpoints changed"}` | `{}` when shutdown is requested |
 
@@ -25,7 +25,7 @@ is defined by `Task` in `internal/docktinel/types.go`. All duration fields are
 integer nanoseconds. API callers provide the complete task, including environment
 and working directory; CLI defaults are applied by the CLI. Main process identity
 must match the entrypoint recorded by the daemon, using Linux `/proc/PID/stat`
-start time. Prefer `docktinel exec` for registering and replacing that process.
+start time. Prefer `docktinel startup -- COMMAND` (or its `exec` alias) for registering and replacing that process.
 
 ```sh
 curl --unix-socket /run/docktinel/control.sock http://localhost/v1/status
@@ -36,7 +36,7 @@ curl --unix-socket /run/docktinel/control.sock \
 
 Startup requests wait for the daemon's startup work. The server limits request
 reading to five seconds, but allows the operation itself to run until its lifecycle
-deadline. Disconnecting or timing out the client does not cancel startup. Other
+deadline. The request timeout is the daemon-enforced budget shared with after-start readiness; it does not include the earlier one-minute registration window. Disconnecting or timing out the client does not cancel startup. Other
 requests, including status, can run concurrently. The CLI retries connection
 establishment while the daemon starts; it never retries a submitted operation.
 

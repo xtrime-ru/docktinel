@@ -251,10 +251,10 @@ func TestRestartRequestStopsContainer(t *testing.T) {
 
 func TestDegradedDependencyRecovers(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms --startup-timeout 10s &
+		docktinel daemon --heartbeat 100ms &
 		docktinel add check optional --phase both --deadline 200ms --interval 100ms \
 			--failure degrade -- test -f /tmp/available
-		docktinel startup
+		docktinel startup --timeout 10s
 		exec docktinel exec -- demo wait
 	`)
 	f.runtime()
@@ -266,8 +266,10 @@ func TestDegradedDependencyRecovers(t *testing.T) {
 
 func TestStartupDeadlineStopsUnfinishedEntrypoint(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms --startup-timeout 300ms --stop-grace 200ms &
-		sleep 600
+		docktinel daemon --heartbeat 100ms --stop-grace 200ms &
+		docktinel add job blocked --phase startup --timeout 1m -- sleep 600
+		docktinel startup --timeout 300ms
+		exec docktinel exec -- demo wait
 	`)
 	f.waitExit()
 }
@@ -283,8 +285,8 @@ func TestLostSnapshotStopsMain(t *testing.T) {
 
 func TestFrozenWatchdogEscalatesTERMToKILL(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms --startup-timeout 10s --stop-grace 200ms &
-		docktinel startup
+		docktinel daemon --heartbeat 100ms --stop-grace 200ms &
+		docktinel startup --timeout 10s
 		exec docktinel exec -- demo wait --ignore-term
 	`)
 	s := f.runtime()
@@ -326,7 +328,7 @@ func TestConfigDuplicateWithAddFails(t *testing.T) {
 		printf '%s' '{"tasks":[{"kind":"job","name":"one","command":["true"]}]}' > "/tmp/test-config.json"
 		docktinel daemon --config /tmp/test-config.json &
 		if docktinel add job one -- true; then exit 42; fi
-		docktinel startup
+		docktinel startup --timeout 10s
 		exec docktinel exec -- demo wait
 	`)
 	f.runtime()
@@ -354,4 +356,14 @@ func TestMissingExplicitConfigFailsStartup(t *testing.T) {
 	if code := f.waitExit(); code == 0 {
 		t.Fatal("missing explicit config did not fail startup")
 	}
+}
+
+func TestStartupTimeoutENVAndCLIOverride(t *testing.T) {
+	f := newFixture(t, `
+		printf '%s' '{"tasks":[{"kind":"job","name":"slow","phase":"startup","command":["sleep","0.2"]}]}' > "/tmp/test-config.json"
+		docktinel daemon --config /tmp/test-config.json &
+		docktinel startup --timeout 10s
+		exec docktinel exec -- demo wait
+	`, "DOCKTINEL_STARTUP_TIMEOUT=invalid")
+	f.runtime()
 }
