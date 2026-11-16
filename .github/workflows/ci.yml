@@ -60,7 +60,10 @@ jobs:
               throw new Error('Use a v-prefixed SemVer tag without build metadata');
             }
             // metadata-action validates SemVer; a flag or suffix makes it a prerelease.
-            core.setOutput('stable', !prerelease && !tag.includes('-'));
+            const stable = !prerelease && !tag.includes('-');
+            core.setOutput('stable', stable);
+            // Pre-1.0 releases do not promise compatibility across minor versions.
+            core.setOutput('aliases', stable && !tag.startsWith('v0.'));
       - uses: docker/metadata-action@v6
         id: meta
         with:
@@ -68,7 +71,8 @@ jobs:
           tags: |
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/master' }}
             type=semver,pattern={{version}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ steps.release.outputs.stable == 'true' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ steps.release.outputs.aliases == 'true' }}
+            type=semver,pattern={{major}},value=${{ github.event.release.tag_name }},enable=${{ steps.release.outputs.aliases == 'true' }}
           flavor: latest=false
       - name: Build image and extract binaries once
         uses: docker/build-push-action@v7
