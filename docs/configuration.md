@@ -140,3 +140,18 @@ The daemon awaits main attachment within the same startup budget. A subsequent
 `exec docktinel startup -- application` or `exec docktinel exec -- application`
 attaches without repeating checks or resetting that deadline. Both spellings
 have identical behavior.
+
+## Validate before launch
+
+```sh
+docktinel config validate --config /etc/docktinel/config.json
+```
+
+Without `--config`, validation uses `DOCKTINEL_CONFIG`, then the default path.
+The selected file must exist. Validation uses exactly the daemon's loader:
+JSON schema, ENV expansion, task defaults, durations, task names and duplicate
+names are checked. Exit status is zero for valid configuration, nonzero otherwise.
+It does not start a daemon, create runtime files, execute commands, resolve
+executables or contact dependencies. Run it in the intended container environment
+so ENV substitutions match deployment. Output contains a task count, not expanded
+configuration or environment values.

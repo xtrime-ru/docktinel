@@ -16,6 +16,7 @@ const Help = `Docktinel — a lightweight sentinel for Docker containers.
 
 Usage: docktinel [--runtime-dir DIR] COMMAND
 
+  config       Validate configuration without starting a daemon
   daemon       Run the daemon in the foreground (start with & in entrypoint)
   add          Register a check, job, or process before startup
   startup      Connect or auto-start with config, run checks, optionally exec application
@@ -77,6 +78,8 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 	u := cliCommandHelp(name, out)
 	f := u.flags
 	switch name {
+	case "config":
+		return configCLI(args, out)
 	case "version":
 		if err := u.parse(args, false); err != nil {
 			return err

@@ -76,6 +76,8 @@ curl http://127.0.0.1:8080
 
 See [the demo](examples/basic/README.md), [DNS/AdGuard integration](examples/adguard/README.md), and the [command reference](docs/commands.md).
 
+Validate configuration before launch with `docktinel config validate --config /etc/docktinel/config.json`. This checks JSON, ENV and task settings without executing commands.
+
 ## Lifecycle
 
 1. `startup` connects to the daemon. If absent, it starts one only when `/etc/docktinel/config.json` (or `DOCKTINEL_CONFIG`) exists and can be loaded. Without both daemon and config, startup fails. For a setup without config, explicitly start `daemon &` and register tasks with `add` first.

@@ -10,6 +10,7 @@ Global flags come before the command. Flags for `add` come after the task kind a
 
 | Command | Options and defaults |
 | --- | --- |
+| `config validate` | `--config PATH` (or `DOCKTINEL_CONFIG` / default path); no daemon required |
 | `daemon` | `--config PATH`, `--heartbeat 5s`, `--stop-grace 10s` |
 | `startup` | `--timeout 2m`, optional `-- COMMAND ARGS...` |
 | `exec -- COMMAND ARGS...` | Full alias for `startup`, with identical flags and behavior |
