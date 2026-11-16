@@ -1,0 +1,12 @@
+services:
+  demo:
+    image: docktinel-demo:local
+    build:
+      context: .
+      args:
+        DOCKTINEL_IMAGE: ${DOCKTINEL_IMAGE:-docktinel:local}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    stop_grace_period: 15s
