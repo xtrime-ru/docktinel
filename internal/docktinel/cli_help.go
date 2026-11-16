@@ -91,6 +91,9 @@ func (u cliUsage) help() {
 	fmt.Fprintf(u.out, "Usage:  %s %s\n\n%s\n\nOptions:\n", u.command, u.args, u.description)
 	fmt.Fprintln(u.out, "  -h, --help                 Show help for this command")
 	u.flags.VisitAll(func(f *flag.Flag) {
+		if f.Usage == "" {
+			return
+		}
 		name, description := flag.UnquoteUsage(f)
 		label := "--" + f.Name
 		if name != "" {

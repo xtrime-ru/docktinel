@@ -174,12 +174,29 @@ func addCLI(args []string, dir string, out io.Writer) error {
 	f.DurationVar(&t.Interval, "interval", t.Interval, "check interval or delay after job completion; zero is one-shot")
 	f.DurationVar(&t.Timeout, "timeout", t.Timeout, "execution timeout; zero is allowed only for processes")
 	f.DurationVar(&t.Deadline, "deadline", t.Deadline, "overall retry budget for startup and after-start tasks")
-	f.DurationVar(&t.Grace, "grace", t.Grace, "delay before first runtime execution")
+	f.DurationVar(&t.Grace, "grace", t.Grace, "delay before first background execution")
 	f.IntVar(&t.Failures, "failures", t.Failures, "consecutive failures before restarting the container")
 	f.IntVar(&t.Successes, "successes", t.Successes, "consecutive successful checks required for readiness or recovery")
 	f.StringVar(&t.Failure, "failure", t.Failure, "degrade or restart-container")
 	f.StringVar(&t.OnExit, "on-exit", t.OnExit, "process action: restart or restart-container")
 	f.StringVar(&t.Lock, "lock", t.Lock, "serialize commands sharing this lock name (not checks)")
+	// Keep accepting legacy options, but do not advertise options this kind ignores.
+	hidden := []string{"on-exit"}
+	if kind == "job" {
+		hidden = append(hidden, "successes")
+	}
+	if kind == "process" {
+		hidden = []string{"interval", "deadline", "failures", "successes", "failure"}
+		f.Lookup("phase").Usage = "startup, after-start, or runtime"
+	}
+	if kind == "check" {
+		hidden = append(hidden, "lock")
+		f.Lookup("phase").Usage = "startup, after-start, runtime, or both"
+		f.Lookup("interval").Usage = "delay between checks; at least 100ms"
+	}
+	for _, name := range hidden {
+		f.Lookup(name).Usage = ""
+	}
 	if err := u.parse(rest, true); err != nil {
 		return err
 	}

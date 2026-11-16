@@ -19,13 +19,12 @@ Global flags come before the command. Flags for `add` come after the task kind a
 | `healthcheck` | `--max-age 30s`, `--stop-grace 10s`, `--startup-grace 2m`, `--no-kill` |
 | `version` | Build version |
 
-`daemon` stays in the foreground; start it with `&` in a shell entrypoint, or let `startup` launch it automatically when a config file exists. Explicit daemon startup loads the optional default config `/etc/docktinel/config.json`. `--config PATH` or `DOCKTINEL_CONFIG` selects a required file. See [configuration and ENV](configuration.md).
-
-The daemon allows one minute to request startup. `startup --timeout` then sets a new, shared budget for startup tasks, waiting for main attachment, and after-start readiness. It is enforced by the daemon even if the client disconnects. `DOCKTINEL_STARTUP_TIMEOUT` supplies the default budget; an explicit CLI flag takes precedence. Minimum heartbeat is 100ms.
-
-`startup` without a command runs checks and returns, leaving the daemon awaiting main attachment. A later `startup -- COMMAND` or `exec -- COMMAND` reuses that startup's deadline. Supplying a command on the first invocation performs both operations. Use `exec docktinel startup -- COMMAND` inside a shell entrypoint to preserve the main PID. With Docker array-form `ENTRYPOINT`, no outer `exec` is needed. If no daemon is running, startup requires an existing config file to launch one; without a daemon and config, both `startup` and `exec` fail without starting an application or daemon. If a daemon is already running, both commands work without a config. If its lock is held but the API is unresponsive, they fail without starting another daemon.
-
-`add`, `status`, and `restart` require a running daemon and never auto-start it, regardless of whether a config exists. They return a nonzero exit code if connection establishment fails within their five-second client deadline. The bounded connection retry also allows `add` to race an explicitly started `daemon &`. `healthcheck` is independent of the API, never starts a daemon, and returns nonzero when the daemon is missing. `help` and `version` do not require a daemon. `daemon` is the explicit start command; it may be used without a default config to register tasks through `add`.
+`daemon` stays in the foreground. Start it with `&` for CLI registration, or
+let `startup` launch it from a config. `startup -- COMMAND` runs startup tasks
+and replaces itself with the application; `exec` is an alias. See
+[startup modes and deadlines](configuration.md#missing-daemon-or-config) for config
+requirements, the shared startup budget, and separate check/attach invocations.
+Minimum heartbeat is 100ms.
 
 The daemon's stop grace is the budget for shutdown jobs together, followed by a separate application TERM grace of the same duration. Task cancellation may take another two seconds. Choose Docker's `stop_grace_period` to match your shutdown requirements. Docker healthcheck escalation has its own grace and runs across invocations, without blocking a single probe.
 
@@ -44,15 +43,19 @@ Names must be unique, 1–64 characters, starting with a letter or digit, follow
 | Option | Check | Job | Process |
 | --- | --- | --- | --- |
 | `--phase` | `runtime` | `runtime` | `runtime` |
-| `--interval` | `10s` | `0` (one-shot) | Not used for normal restarts |
+| `--interval` | `10s` | `0` (one-shot) | — |
 | `--timeout` | `5s` | `1m` | `0` (unlimited) |
-| `--deadline` | `1m` | `1m` | Not used |
+| `--deadline` | `1m` | `1m` | — |
 | `--grace` | `0` | `0` | `0` |
-| `--failures` | `3` | `3` | Not used |
-| `--successes` | `1` | Must remain `1` | Must remain `1` |
-| `--failure` | `restart-container` | `degrade` | Use `--on-exit` |
-| `--on-exit` | Not used | Not used | `restart` |
+| `--failures` | `3` | `3` | — |
+| `--successes` | `1` | — | — |
+| `--failure` | `restart-container` | `degrade` | — |
+| `--on-exit` | — | — | `restart` |
 | `--lock NAME` | Not allowed | Optional | Optional |
+
+Help lists applicable options for each task kind. For compatibility, processes
+still accept `--failure`, and checks/jobs accept `--on-exit`; these options do
+not change their policy.
 
 - `startup`: run before the application. Checks/jobs run sequentially and retry until successful or their deadline expires. Processes start in the background and remain supervised; add a following check if their readiness matters.
 - `after-start`: run after `exec`, while the application is already running. Use for readiness probes that require its listener to exist. Runtime tasks start after this phase completes.
@@ -62,7 +65,27 @@ Names must be unique, 1–64 characters, starting with a letter or digit, follow
 
 For startup/after-start, `--deadline` limits the whole task including retries; `--timeout` limits an individual attempt. A failed task retries after `--interval` (one second if zero). `--failures` applies only at runtime. Critical startup failures stop the container when the deadline expires; optional failures allow startup to continue in degraded state. A startup-only optional task has no later retry: use `both` to recover automatically.
 
-At runtime, failed checks retry at their configured interval. Failed jobs use nominal delays of 5, 10, 20, 40, then 60 seconds with ±20% jitter. A successful one-shot job stops; a failed one keeps retrying. Periodic jobs resume their configured interval after success. `--failure restart-container` restarts after the configured consecutive failure threshold. Process `--on-exit restart-container` stops the container on **any** exit, including zero. For processes, `--failure` does not change criticality; `--on-exit` is the sole exit policy. Default process policy restarts after any exit. A process that ran for more than 30 seconds restarts immediately and resets its backoff. Shorter runs (including exactly 30 seconds), launch errors and either exit code use nominal delays of 1, 2, 4, 8, 16, then 30 seconds with ±20% jitter. Jitter applies after the nominal cap, so the maximum actual delays are 36 seconds for processes and 72 seconds for jobs. Waiting for a shared lock does not count as process lifetime. Shutdown interrupts all backoff waits. Startup and after-start retries keep their fixed intervals within the existing deadline.
+At runtime, `--failure restart-container` stops the application after the
+configured consecutive failure threshold. Optional failures remain degraded.
+
+| Task | Retry delay |
+| --- | --- |
+| Check | Configured interval |
+| Failed job | 5, 10, 20, 40, then 60 seconds, ±20% jitter |
+| Exited process | 1, 2, 4, 8, 16, then 30 seconds, ±20% jitter |
+
+A successful one-shot job stops; a failed one keeps retrying. Successful periodic
+jobs reset backoff and resume their interval. For processes, either exit code and
+launch errors use backoff. A process that ran **more than 30 seconds** restarts
+immediately and resets backoff; waiting for a lock does not count as lifetime.
+Jitter applies after the cap, so actual maximum delays are 72s for jobs and 36s
+for processes. Shutdown interrupts waits. Startup/after-start use fixed intervals
+within their deadlines.
+
+Processes use `--on-exit`: `restart` relaunches the helper, while
+`restart-container` stops the application on **any** exit, including zero. A
+helper waiting to restart has state `restarting` and degrades container health;
+a successful launch clears its error. Use a separate check for service readiness.
 
 `--grace` delays the first background execution; it does not postpone startup/after-start checks or change their deadlines. Minimum nonzero interval is 100ms. Only processes may have an unlimited timeout.
 

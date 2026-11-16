@@ -43,7 +43,8 @@ Commands are argument arrays, without implicit shell interpretation. Tasks
 inherit the daemon's environment and working directory. `env` and `dir` are not
 config properties. Use an explicit shell only if your command needs shell syntax.
 CLI-registered tasks continue to inherit their registering client's environment
-and working directory. You may add tasks after config loading, but all names
+and working directory. Executables are resolved using that task’s `PATH`; relative
+PATH entries use its working directory. You may add tasks after config loading, but all names
 must remain unique; registration closes when startup begins.
 
 ## ENV settings
@@ -99,16 +100,16 @@ docktinel add check dns --phase both -- /opt/bin/check-dns
 exec docktinel startup --timeout 30s -- application --foreground
 ```
 
-No config file is needed in this flow. Once started, the daemon owns its task
-registrations; clients do not need to reread a config. In contrast, a direct
-`docktinel startup` or `docktinel exec -- application` with no daemon and no
-config fails without launching an application or background daemon. A valid
-empty config (`{"tasks":[]}`) is still an explicit configuration and is allowed.
+`add`, `status`, and `restart` retry connection establishment for up to five
+seconds, allowing registration to race `daemon &`; submitted operations are never
+replayed. A held daemon lock with an unavailable API is an error, not a reason to
+start another instance. Once running, the daemon owns the registrations; clients
+do not reread config. A valid empty config (`{"tasks":[]}`) is allowed.
 
-Help/version are intentionally independent of daemon availability. Healthcheck
-retains its independent watchdog behavior: a dead/stuck daemon is reported as
-unhealthy and may cause application termination according to its existing
-TERM/KILL policy; it never attempts to repair this by starting a daemon.
+The daemon allows one minute for registration. `startup --timeout` then sets a
+shared budget (default 2m) for startup tasks, main attachment and after-start
+readiness. `DOCKTINEL_STARTUP_TIMEOUT` sets its default; an explicit flag wins.
+The daemon enforces this budget even if the client disconnects.
 
 ## One-command Docker entrypoint
 
@@ -119,14 +120,15 @@ ENTRYPOINT ["docktinel", "startup", "--"]
 CMD ["application", "--foreground"]
 ```
 
-Run the container with `--init` / Compose `init: true` and a restart policy.
-Startup connects to a running daemon or starts one if absent **only with an
-existing config file**, then waits for startup checks and replaces itself with
-the application. The auto-started daemon treats that path as required: if the
-file disappears before it is read, startup fails rather than launching with
-no tasks. Automatic startup accepts regular files, including symlinks to
-regular files. After-start checks run
-in the background within the remaining budget. No shell entrypoint is required.
+Run with `--init` / Compose `init: true` and a restart policy. Startup connects
+to the daemon or auto-starts one with an existing config, waits for startup tasks,
+then replaces itself with the application. After-start checks run in the
+background within the remaining budget. In a shell entrypoint, use
+`exec docktinel startup -- application` to preserve the recorded main PID.
+
+Auto-start requires a regular config file (symlinks are allowed) and fails if it
+disappears before loading. No config and no daemon means startup fails without
+launching either process.
 
 A shell-based setup can select a different config explicitly:
 

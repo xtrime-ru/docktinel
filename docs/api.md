@@ -37,7 +37,7 @@ curl --unix-socket /run/docktinel/control.sock \
 Startup requests wait for the daemon's startup work. The server limits request
 reading to five seconds, but allows the operation itself to run until its lifecycle
 deadline. The request timeout is the daemon-enforced budget shared with after-start readiness; it does not include the earlier one-minute registration window. Disconnecting or timing out the client does not cancel startup. Other
-requests, including status, can run concurrently. State transitions to runtime and stopping publish the independent snapshot immediately; a failed task remains degraded until an attempt succeeds, including while a retry is running. The CLI retries connection
+requests, including status, can run concurrently. State transitions to runtime and stopping publish the independent snapshot immediately; failed checks/jobs remain degraded while retrying; helpers recover when a new process starts. The CLI retries connection
 establishment while the daemon starts; it never retries a submitted operation.
 
 `status` queries the daemon with a five-second client deadline. For postmortem

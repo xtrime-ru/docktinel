@@ -77,7 +77,7 @@ CMD ["application", "--foreground"]
 
 The daemon loads the config; `startup` runs startup tasks before replacing itself with the application. Failed startup tasks retry within their deadlines. After-start checks then verify readiness; runtime tasks begin once those finish. The default **2-minute budget** covers startup, main attachment, and after-start readiness. Set `DOCKTINEL_STARTUP_TIMEOUT` or `startup --timeout` to change it. `exec` is an alias for `startup`.
 
-Automatic daemon launch requires an existing config. `add`, `status` and `restart` require a running daemon. For a setup without a file, start the daemon explicitly and register tasks before startup:
+For a setup without a file, start the daemon explicitly and register tasks before startup:
 
 ```sh
 #!/bin/sh
