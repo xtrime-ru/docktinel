@@ -91,3 +91,18 @@ docktinel add job cleanup --phase shutdown --timeout 5s -- /opt/bin/cleanup
 # A maintenance script requests a restart explicitly if reinitialization needs it.
 docktinel restart --reason 'DNS endpoints changed; reload unavailable'
 ```
+
+## State transition logs
+
+Docktinel emits structured `slog` events to stderr:
+
+- `event=container_state_changed`: `from_phase`, `phase`, `from_state`, `state`, `reason`.
+- `event=task_state_changed`: `task`, `kind`, `phase`, `from_state`, `state`, `failures`, `reason`.
+
+Recovery is logged as `task recovered`. A container returns from degraded to
+healthy only when all failed tasks recover. Normal successful attempts do not
+repeat health-transition events; individual failures retain their diagnostic
+logs. A transient command execution does not constitute a health transition.
+Events do not contain command arguments or ENV values; task stdout/stderr remain
+under the helper command's control. Concurrent task events may be interleaved;
+use their explicit from/to fields to interpret each transition.

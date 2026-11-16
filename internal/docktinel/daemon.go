@@ -124,6 +124,7 @@ func RunDaemon(cfg Config) error {
 		return err
 	}
 	slog.Info("Docktinel listening", "socket", socket)
+	logLifecycle(lifecycleState{}, lifecycleState{d.status.Phase, d.status.State}, "daemon started")
 	server := d.controlServer()
 	defer server.Close()
 	serveErrors := make(chan error, 1)
@@ -163,18 +164,11 @@ func (d *Daemon) snapshot() Status {
 	s.Heartbeat, _ = uptime()
 	s.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.Tasks = make([]TaskStatus, 0, len(d.tasks))
-	degraded := false
 	for _, task := range d.tasks {
 		t := d.states[task.Name]
 		s.Tasks = append(s.Tasks, t)
-		degraded = degraded || t.Failures > 0
 	}
-	if s.Phase == "runtime" {
-		s.State = "healthy"
-		if degraded {
-			s.State = "degraded"
-		}
-	}
+	s.State = d.lifecycleLocked().state
 	return s
 }
 
@@ -227,21 +221,27 @@ func (d *Daemon) startup(budget time.Duration) error {
 		d.stop("registration deadline exceeded", true)
 		return errors.New("registration deadline exceeded")
 	}
+	before := d.lifecycleLocked()
 	d.status.StartupDeadline = now + budget.Seconds()
 	d.status.Phase = "startup"
 	d.workers.Add(1)
 	tasks := slices.Clone(d.tasks)
+	after := d.lifecycleLocked()
 	d.mu.Unlock()
+	logLifecycle(before, after, "startup requested")
 	defer d.workers.Done()
 	if err := d.runPhase("startup", tasks); err != nil {
 		d.stop(err.Error(), true)
 		return err
 	}
 	d.mu.Lock()
+	before = d.lifecycleLocked()
 	if d.status.Phase == "startup" {
 		d.status.Phase = "awaiting-main"
 	}
+	after = d.lifecycleLocked()
 	d.mu.Unlock()
+	logLifecycle(before, after, "startup checks completed")
 	return d.publish()
 }
 
@@ -264,11 +264,14 @@ func (d *Daemon) attach(main *Identity) error {
 		d.stop("startup deadline exceeded", true)
 		return errors.New("startup deadline exceeded")
 	}
+	before := d.lifecycleLocked()
 	d.status.Main = *main
 	d.status.Phase = "after-start"
 	d.workers.Add(1)
 	tasks := slices.Clone(d.tasks)
+	after := d.lifecycleLocked()
 	d.mu.Unlock()
+	logLifecycle(before, after, "main process attached")
 	if err := d.publish(); err != nil {
 		d.workers.Done()
 		return err
@@ -284,13 +287,16 @@ func (d *Daemon) attach(main *Identity) error {
 			d.mu.Unlock()
 			return
 		}
+		before := d.lifecycleLocked()
 		d.status.Phase = "runtime"
 		for _, task := range tasks {
 			if task.Phase == "runtime" || task.Phase == "both" {
 				d.launchLocked(task)
 			}
 		}
+		after := d.lifecycleLocked()
 		d.mu.Unlock()
+		logLifecycle(before, after, "readiness checks completed")
 		if err := d.publish(); err != nil {
 			d.stop("cannot publish runtime state", true)
 		}
@@ -303,14 +309,16 @@ func (d *Daemon) stop(reason string, terminateMain bool) {
 	d.stopOnce.Do(func() {
 		now, _ := uptime()
 		d.mu.Lock()
+		before := d.lifecycleLocked()
 		d.status.Phase = "stopping"
 		d.status.State = "unhealthy"
 		d.status.Reason = reason
 		d.status.StopDeadline = now + 2*d.cfg.StopGrace.Seconds() + 5
 		main := d.status.Main
 		tasks := slices.Clone(d.tasks)
+		after := d.lifecycleLocked()
 		d.mu.Unlock()
-		slog.Warn("stopping", "reason", reason)
+		logLifecycle(before, after, reason)
 		d.cancel()
 		if err := d.publish(); err != nil {
 			slog.Error("cannot publish stopping state", "error", err)

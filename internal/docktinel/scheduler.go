@@ -59,10 +59,18 @@ func (d *Daemon) runPhase(phase string, tasks []Task) error {
 
 func (d *Daemon) update(name string, fn func(*TaskStatus)) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	s := d.states[name]
-	fn(&s)
-	d.states[name] = s
+	beforeLife := d.lifecycleLocked()
+	before := d.states[name]
+	after := before
+	after.health = taskHealth(before)
+	fn(&after)
+	after.health = taskHealth(after)
+	d.states[name] = after
+	afterLife := d.lifecycleLocked()
+	d.mu.Unlock()
+	// Emit outside the state lock; stdout backpressure must not lock the API.
+	logTaskTransition(before, after, afterLife.phase)
+	logLifecycle(beforeLife, afterLife, "task "+name)
 }
 
 func (d *Daemon) launch(task Task) {

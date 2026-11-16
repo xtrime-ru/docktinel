@@ -105,6 +105,7 @@ type Identity struct {
 }
 
 type TaskStatus struct {
+	health        string    // Last logical health, independent of transient execution state.
 	Name          string    `json:"name"`
 	Kind          string    `json:"kind"`
 	State         string    `json:"state"`
