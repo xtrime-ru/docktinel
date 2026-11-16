@@ -203,7 +203,7 @@ func TestTimeoutKillsCommandGroup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	if execute(ctx, task, nil) == nil {
+	if _, err := execute(ctx, task, nil); err == nil {
 		t.Fatal("timed-out command succeeded")
 	}
 	if time.Since(started) > 4*time.Second {

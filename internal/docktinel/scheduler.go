@@ -99,7 +99,12 @@ func (d *Daemon) launchLocked(task Task) {
 	d.workers.Go(func() { d.runTask(task) })
 }
 
-func (d *Daemon) attempt(parent context.Context, task Task) (err error) {
+func (d *Daemon) attempt(parent context.Context, task Task) error {
+	_, err := d.attemptRun(parent, task)
+	return err
+}
+
+func (d *Daemon) attemptRun(parent context.Context, task Task) (elapsed time.Duration, err error) {
 	ctx := parent
 	cancel := func() {}
 	if task.Timeout > 0 {
@@ -146,7 +151,7 @@ func (d *Daemon) attempt(parent context.Context, task Task) (err error) {
 		case lock <- struct{}{}:
 			defer func() { <-lock }()
 		case <-ctx.Done():
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
 	}
 	return execute(ctx, task, func(p Identity) { d.update(task.Name, func(s *TaskStatus) { s.Process = &p }) })
@@ -171,18 +176,15 @@ func (d *Daemon) runTask(task Task) {
 	if !delay(d.ctx, task.Grace) {
 		return
 	}
-	retries := 0
+	backoff := retryBackoff{}
 	for d.ctx.Err() == nil {
-		err := d.attempt(d.ctx, task)
+		elapsed, err := d.attemptRun(d.ctx, task)
 		if d.ctx.Err() != nil {
 			return
 		}
 		failures := 0
 		if err != nil {
-			retries++
 			failures = d.markFailure(task, err)
-		} else {
-			retries = 0
 		}
 		if task.Kind == "process" && task.critical() {
 			d.stop("process exited: "+task.Name, true)
@@ -195,13 +197,7 @@ func (d *Daemon) runTask(task Task) {
 		if err == nil && task.Kind == "job" && task.Interval == 0 {
 			return
 		}
-		pause := task.Interval
-		switch {
-		case err != nil && task.Kind != "check":
-			pause = min(time.Duration(10*retries)*time.Second, time.Minute)
-		case task.Kind == "process":
-			pause = 100 * time.Millisecond
-		}
+		pause := backoff.next(task, elapsed, err != nil)
 		now, _ := uptime()
 		d.update(task.Name, func(s *TaskStatus) {
 			s.Due = now + pause.Seconds() + task.Timeout.Seconds() + d.cfg.Heartbeat.Seconds() + 3

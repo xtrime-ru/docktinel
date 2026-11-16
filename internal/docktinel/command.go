@@ -9,19 +9,20 @@ import (
 )
 
 // Every task owns a process group. Cancel the group, not just its shell.
-func execute(ctx context.Context, task Task, onStart func(Identity)) error {
+func execute(ctx context.Context, task Task, onStart func(Identity)) (time.Duration, error) {
 	cmd := exec.Command(task.Command[0], task.Command[1:]...)
 	cmd.Env, cmd.Dir = task.Env, task.Dir
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return 0, err
 	}
 	// All exit paths clean up children left in the command's process group.
 	defer syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	started := time.Now()
 	if p, err := processIdentity(cmd.Process.Pid); err == nil && onStart != nil {
 		onStart(p)
 	}
@@ -29,7 +30,7 @@ func execute(ctx context.Context, task Task, onStart func(Identity)) error {
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
-		return err
+		return time.Since(started), err
 	case <-ctx.Done():
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		timer := time.NewTimer(commandStopGrace)
@@ -40,11 +41,14 @@ func execute(ctx context.Context, task Task, onStart func(Identity)) error {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			<-done
 		}
-		return ctx.Err()
+		return time.Since(started), ctx.Err()
 	}
 }
 
 func delay(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
