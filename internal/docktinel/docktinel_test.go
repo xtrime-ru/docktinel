@@ -462,6 +462,37 @@ func TestRuntimeTransitionPublishesWithoutHeartbeat(t *testing.T) {
 	}
 }
 
+func TestShutdownRunsCleanupWithStuckWorker(t *testing.T) {
+	d := testDaemon(t)
+	d.cfg.StopGrace = 8 * time.Second
+	cleanup := testTask("cleanup", "job", "touch cleaned")
+	cleanup.Phase = "shutdown"
+	cleanup.Dir = d.cfg.Dir
+	if err := d.add(cleanup); err != nil {
+		t.Fatal(err)
+	}
+	d.workers.Add(1)
+	defer d.workers.Done()
+
+	started := time.Now()
+	d.stop("test shutdown", false)
+	status := d.snapshot()
+	if remaining := status.StopDeadline - status.Heartbeat; remaining <= 0 || remaining > d.cfg.StopGrace.Seconds() {
+		t.Fatalf("unexpected shutdown budget: %.3fs remaining", remaining)
+	}
+	select {
+	case <-d.done:
+	case <-time.After(d.cfg.StopGrace + time.Second):
+		t.Fatal("stuck worker prevented shutdown")
+	}
+	if elapsed := time.Since(started); elapsed < d.cfg.StopGrace/2 {
+		t.Fatalf("finished before half the shutdown budget elapsed: %v", elapsed)
+	}
+	if _, err := os.Stat(filepath.Join(d.cfg.Dir, "cleaned")); err != nil {
+		t.Fatalf("shutdown job did not run: %v", err)
+	}
+}
+
 func TestConcurrentPublicationKeepsStoppingState(t *testing.T) {
 	d := testDaemon(t)
 	if err := d.publish(); err != nil {

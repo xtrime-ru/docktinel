@@ -89,7 +89,7 @@ func command(name string, args []string, dir string, out io.Writer, version stri
 	case "daemon", "exec":
 		heartbeat := f.Duration("heartbeat", 5*time.Second, "state publication interval")
 		config := f.String("config", "", "config file (DOCKTINEL_CONFIG or /etc/docktinel/config.json)")
-		grace := f.Duration("stop-grace", 10*time.Second, "shared budget for shutdown jobs")
+		grace := f.Duration("stop-grace", 9500*time.Millisecond, "total shutdown budget including active tasks")
 		timeout := f.Duration("timeout", defaultStartupTimeout, "shared startup and after-start budget (DOCKTINEL_STARTUP_TIMEOUT)")
 		if err := u.parse(args, name == "exec"); err != nil {
 			return err

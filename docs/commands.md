@@ -13,7 +13,7 @@ Global flags come before the command. Durations use Go syntax such as
 | --- | --- |
 | `add check\|job\|process NAME` | Task options and `--config PATH`, followed by `-- COMMAND ARGS...` |
 | `config validate` | `--config PATH` (or `DOCKTINEL_CONFIG` / default path); no daemon required |
-| `daemon` | `--config PATH`, `--heartbeat 5s`, `--stop-grace 10s`, `--timeout 2m` |
+| `daemon` | `--config PATH`, `--heartbeat 5s`, `--stop-grace 9.5s`, `--timeout 2m` |
 | `exec [OPTIONS] -- COMMAND ARGS...` | Same options as `daemon`. Append the application as a startup process |
 | `restart --reason TEXT` | Cancel active tasks, run shutdown jobs, and exit with a nonzero status |
 | `status` | `--json` for machine-readable output |
@@ -32,10 +32,12 @@ On Docker TERM or INT, the daemon cancels active tasks, runs shutdown jobs, and
 exits successfully. A requested restart or critical failure exits with a nonzero
 status. Use a Docker restart policy to start the container again.
 
-The daemon's `--stop-grace` is the shared shutdown job budget. Allow up to four
-additional seconds in the Docker stop timeout for process groups to exit after
-cancellation, including a shutdown job that exceeds its deadline. Healthcheck
-escalation has its own grace and runs across invocations.
+The daemon's `--stop-grace` is the total shutdown budget, including waiting
+for active tasks, running shutdown jobs, and terminating their processes.
+Cleanup starts when active tasks exit or half the budget has elapsed,
+whichever comes first. Set Docker's `stop_grace_period` slightly above the
+daemon's budget. Healthcheck escalation has its own grace and runs across
+invocations.
 
 `--startup-grace` only allows a missing initial snapshot; a valid snapshot carries its own startup deadline. Lost or corrupt state after initialization triggers escalation. If both status and identity files are missing, healthcheck waits out its startup grace, then attempts to identify the unique direct child of `docker-init` as PID 1; if ambiguous, it reports an error without guessing a PID.
 

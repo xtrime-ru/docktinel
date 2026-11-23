@@ -263,6 +263,7 @@ func (d *Daemon) startup() (err error) {
 }
 
 func (d *Daemon) stop(reason string, restart bool) {
+	deadline := time.Now().Add(d.cfg.StopGrace)
 	now, _ := uptime()
 	d.mu.Lock()
 	if d.status.Phase == "stopping" {
@@ -271,7 +272,7 @@ func (d *Daemon) stop(reason string, restart bool) {
 	}
 	before := d.lifecycleLocked()
 	d.status.Phase, d.status.State, d.status.Reason = "stopping", "unhealthy", reason
-	d.status.StopDeadline = now + (d.cfg.StopGrace + 2*commandStopGrace + time.Second).Seconds()
+	d.status.StopDeadline = now + d.cfg.StopGrace.Seconds()
 	after := d.lifecycleLocked()
 	d.mu.Unlock()
 
@@ -281,20 +282,52 @@ func (d *Daemon) stop(reason string, restart bool) {
 		slog.Error("cannot publish stopping state", "error", err)
 	}
 	go func() {
-		// Allow the external healthcheck to escalate if a worker cannot exit.
-		d.workers.Wait()
-		cleanup, cancel := context.WithTimeout(context.Background(), d.cfg.StopGrace)
 		defer close(d.done)
-		defer cancel()
+		d.shutdown(deadline)
+		if restart {
+			d.stopError = errors.New(reason)
+		}
+	}()
+}
+
+func (d *Daemon) shutdown(deadline time.Time) {
+	workersDone := make(chan struct{})
+	go func() {
+		d.workers.Wait()
+		close(workersDone)
+	}()
+	// Give active workers at most the first half of the shutdown budget.
+	timer := time.NewTimer(time.Until(deadline.Add(-d.cfg.StopGrace / 2)))
+	defer timer.Stop()
+	select {
+	case <-workersDone:
+	case <-timer.C:
+		slog.Warn("workers still running halfway through shutdown; starting cleanup")
+	}
+
+	// Cancel the last command early enough to give it time to terminate.
+	commandGrace := min(commandStopGrace, time.Until(deadline)/2)
+	cleanup, cancel := context.WithDeadline(context.Background(), deadline.Add(-max(0, commandGrace)))
+	defer cancel()
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
 		for _, task := range d.tasks {
+			if cleanup.Err() != nil {
+				return
+			}
 			if task.Phase == "shutdown" {
 				if err := d.attempt(cleanup, task); err != nil {
 					slog.Warn("cleanup failed", "task", task.Name, "error", err)
 				}
 			}
 		}
-		if restart {
-			d.stopError = errors.New(reason)
-		}
 	}()
+
+	timer.Reset(time.Until(deadline))
+	select {
+	case <-cleanupDone:
+	case <-timer.C:
+		slog.Warn("cleanup did not finish before shutdown deadline")
+	}
 }
