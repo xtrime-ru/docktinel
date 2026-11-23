@@ -90,6 +90,22 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+func TestAddPreservesDanglingConfigSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path, target := filepath.Join(dir, "config.json"), filepath.Join(dir, "missing.json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	task := taskDefaults("job", "task")
+	task.Command = []string{"true"}
+	if err := addConfigTask(path, task); err == nil {
+		t.Fatal("add accepted a dangling symlink")
+	}
+	if got, err := os.Readlink(path); err != nil || got != target {
+		t.Fatalf("config symlink changed: target=%q error=%v", got, err)
+	}
+}
+
 func TestConfigPathPrecedence(t *testing.T) {
 	t.Setenv("DOCKTINEL_CONFIG", "")
 	if path := configPath(""); path != DefaultConfig {

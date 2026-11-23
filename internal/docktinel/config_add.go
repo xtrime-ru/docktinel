@@ -92,6 +92,8 @@ func addConfigTask(path string, task Task) error {
 		path = target
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	} else if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("resolve config %s: %w", path, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
