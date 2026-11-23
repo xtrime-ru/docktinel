@@ -37,20 +37,28 @@ func TestUnixHTTPAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := serveTestAPI(t, d)
-	var status Status
-	if err := callAPI(dir, "GET", "/v1/status", nil, &status, time.Second); err != nil {
-		t.Fatal(err)
-	}
-	if len(status.Tasks) != 1 || status.Tasks[0].Name != "dns" {
-		t.Fatal(status)
-	}
 	// No status file exists: status must query the daemon rather than disk.
 	var out, stderr bytes.Buffer
 	if code := CLI([]string{"--runtime-dir", dir, "status", "--json"}, &out, &stderr, "test"); code != 0 {
 		t.Fatalf("status: %s", &stderr)
 	}
+	var status Status
 	if err := json.Unmarshal(out.Bytes(), &status); err != nil {
 		t.Fatal(err)
+	}
+	if len(status.Tasks) != 1 || status.Tasks[0].Name != "dns" {
+		t.Fatal(status)
+	}
+	if err := callAPI(dir, "POST", "/v1/restart", &restartRequest{Reason: "test request"}, nil, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-d.done:
+		if d.stopError == nil || d.stopError.Error() != "test request" {
+			t.Fatalf("wrong restart reason: %v", d.stopError)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restart did not stop the daemon")
 	}
 }
 

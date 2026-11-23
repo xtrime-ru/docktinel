@@ -20,13 +20,20 @@ func (d *Daemon) controlServer() *http.Server {
 	})
 	mux.HandleFunc("POST /v1/restart", func(w http.ResponseWriter, r *http.Request) {
 		var req restartRequest
-		if !decodeAPI(w, r, &req) {
+		if err := json.UnmarshalRead(http.MaxBytesReader(w, r.Body, maxJSONSize), &req, json.RejectUnknownMembers(true)); err != nil {
+			code := http.StatusBadRequest
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+				code = http.StatusRequestEntityTooLarge
+			}
+			writeAPI(w, code, apiError{err.Error()})
 			return
 		}
 		if req.Reason == "" {
 			writeAPI(w, http.StatusBadRequest, apiError{"restart requires a reason"})
 			return
 		}
+		// Complete the response before shutdown can close the connection.
+		w.Header().Set("Content-Length", "2")
 		writeAPI(w, http.StatusOK, struct{}{})
 		_ = http.NewResponseController(w).Flush()
 		d.stop(req.Reason, true)
@@ -38,20 +45,6 @@ func (d *Daemon) controlServer() *http.Server {
 	}
 }
 
-func decodeAPI(w http.ResponseWriter, r *http.Request, value any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONSize)
-	err := json.UnmarshalRead(r.Body, value, json.RejectUnknownMembers(true))
-	if err == nil {
-		return true
-	}
-	code := http.StatusBadRequest
-	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-		code = http.StatusRequestEntityTooLarge
-	}
-	writeAPI(w, code, apiError{err.Error()})
-	return false
-}
-
 func writeAPI(w http.ResponseWriter, code int, value any) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(apiTimeout))
 	w.Header().Set("Content-Type", "application/json")
@@ -59,41 +52,42 @@ func writeAPI(w http.ResponseWriter, code int, value any) {
 	_ = json.MarshalWrite(w, value)
 }
 
-func callAPI(dir, method, path string, body, result any, timeout time.Duration) error {
-	if timeout <= 0 {
-		return errors.New("API timeout must be positive")
-	}
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
+func callAPI(dir, method, path string, restart *restartRequest, status *Status, timeout time.Duration) error {
+	var body io.Reader
+	if restart != nil {
+		data, err := json.Marshal(restart)
 		if err != nil {
 			return err
 		}
-		reader = bytes.NewReader(data)
+		body = bytes.NewReader(data)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		// Retry only connection establishment: never replay a mutation after sending it.
-		dialer := net.Dialer{Timeout: 200 * time.Millisecond}
-		for {
-			conn, err := dialer.DialContext(ctx, "unix", filepath.Join(dir, "control.sock"))
-			if err == nil {
-				return conn, nil
-			}
-			if !delay(ctx, retryInterval) {
-				return nil, fmt.Errorf("connect to daemon: %w", ctx.Err())
-			}
-		}
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(ctx, method, "http://docktinel"+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, "http://docktinel"+path, body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(req)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	socket := filepath.Join(dir, "control.sock")
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			// Retry connection establishment before sending the request.
+			dialer := net.Dialer{Timeout: 200 * time.Millisecond}
+			for {
+				conn, err := dialer.DialContext(ctx, "unix", socket)
+				if err == nil {
+					return conn, nil
+				}
+				if !delay(ctx, retryInterval) {
+					return nil, fmt.Errorf("connect to daemon: %w", ctx.Err())
+				}
+			}
+		},
+	}
+	response, err := transport.RoundTrip(req)
 	if err != nil {
 		return err
 	}
@@ -109,10 +103,10 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 		}
 		return fmt.Errorf("daemon API: %s", response.Status)
 	}
-	if result == nil {
-		result = &struct{}{}
+	if status != nil {
+		return json.Unmarshal(data, status)
 	}
-	return json.Unmarshal(data, result)
+	return json.Unmarshal(data, &struct{}{})
 }
 
 func daemonStatus(dir string, timeout time.Duration) (Status, error) {

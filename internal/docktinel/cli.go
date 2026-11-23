@@ -119,7 +119,7 @@ func command(name string, args []string, dir string, out io.Writer, version stri
 		if *reason == "" {
 			return u.invalid(errors.New("required flag --reason is missing or empty"))
 		}
-		return callAPI(dir, "POST", "/v1/restart", restartRequest{Reason: *reason}, nil, apiTimeout)
+		return callAPI(dir, "POST", "/v1/restart", &restartRequest{Reason: *reason}, nil, apiTimeout)
 	case "status":
 		asJSON := f.Bool("json", false, "print JSON status")
 		if err := u.parse(args, false); err != nil {
