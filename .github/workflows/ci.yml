@@ -138,25 +138,6 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  package-binaries:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: linux-binary-*
-          merge-multiple: true
-          path: dist
-      - name: Generate checksums
-        working-directory: dist
-        run: sha256sum docktinel-linux-amd64 docktinel-linux-arm64 > SHA256SUMS
-      - uses: actions/upload-artifact@v7
-        with:
-          name: linux-binaries
-          path: dist/
-          if-no-files-found: error
-          overwrite: true
-
   publish:
     if: github.event_name == 'push' || github.event_name == 'release'
     needs: [metadata, build]
@@ -196,14 +177,15 @@ jobs:
 
   release-binaries:
     if: github.event_name == 'release'
-    needs: [package-binaries, publish]
+    needs: publish
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: linux-binaries
+          pattern: linux-binary-*
+          merge-multiple: true
           path: dist
       - name: Attach binaries and checksums to the release
         shell: bash
@@ -213,7 +195,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          sha256sum --check SHA256SUMS
+          sha256sum docktinel-linux-amd64 docktinel-linux-arm64 > SHA256SUMS
           assets=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
           missing=()
           for file in docktinel-linux-amd64 docktinel-linux-arm64 SHA256SUMS; do
