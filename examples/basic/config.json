@@ -8,6 +8,13 @@
       "command": ["sh", "-c", "printf '%s\\n' \"$DEMO_MESSAGE\" > /srv/index.html"]
     },
     {
+      "kind": "process",
+      "name": "application",
+      "phase": "startup",
+      "on_exit": "restart-container",
+      "command": ["demo", "serve"]
+    },
+    {
       "kind": "check",
       "name": "ready",
       "phase": "after-start",

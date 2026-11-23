@@ -1,6 +1,8 @@
 # AdGuard Home
 
-[Dockerfile](Dockerfile) extends the official AdGuard Home image with Docktinel. It embeds a DNS probe and a shell entrypoint that starts `docktinel daemon`, registers checks with `docktinel add`, then runs `exec docktinel startup -- "$@"`. No Docktinel JSON config is used; AdGuard Home keeps its own application configuration.
+[Dockerfile](Dockerfile) extends the official AdGuard Home image with Docktinel.
+It embeds a DNS probe and uses `docktinel add` at image build time to configure
+its checks. Docker init starts `docktinel exec`, which runs AdGuard Home.
 
 From the repository root:
 

@@ -12,6 +12,11 @@ import (
 	"syscall"
 )
 
+func hasDockerInit() bool {
+	name, err := os.ReadFile("/proc/1/comm")
+	return err == nil && strings.TrimSpace(string(name)) == "docker-init"
+}
+
 // Linux boot time is shared between processes and unaffected by wall clock changes.
 func uptime() (float64, error) {
 	b, err := os.ReadFile("/proc/uptime")
@@ -74,6 +79,10 @@ func writeJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
+	return writeJSONFile(path, b)
+}
+
+func writeJSONFile(path string, b []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".state-*")
 	if err != nil {
 		return err
@@ -93,7 +102,7 @@ func writeJSON(path string, value any) error {
 }
 
 // readJSON decodes a complete, bounded document and rejects trailing JSON.
-func readJSON[T any](path string) (value T, err error) {
+func readJSON[T any](path string, opts ...json.Options) (value T, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return value, err
@@ -103,7 +112,7 @@ func readJSON[T any](path string) (value T, err error) {
 	if err != nil {
 		return value, err
 	}
-	if err = json.Unmarshal(data, &value); err != nil {
+	if err = json.Unmarshal(data, &value, opts...); err != nil {
 		var zero T
 		return zero, err
 	}

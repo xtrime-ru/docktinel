@@ -10,9 +10,8 @@ COPY --from=docktinel /usr/local/bin/docktinel /usr/local/bin/docktinel
 COPY --from=demo-build /out/demo /usr/local/bin/demo
 WORKDIR /srv
 COPY config.json /etc/docktinel/config.json
-ENV TINI_KILL_PROCESS_GROUP=1 DOCKTINEL_STARTUP_TIMEOUT=30s DEMO_MESSAGE="Hello from Docktinel!"
+ENV DOCKTINEL_STARTUP_TIMEOUT=30s DEMO_MESSAGE="Hello from Docktinel!"
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
     CMD ["docktinel", "healthcheck", "--startup-grace", "30s"]
-ENTRYPOINT ["docktinel", "startup", "--"]
-CMD ["demo", "serve"]
+ENTRYPOINT ["docktinel", "daemon"]

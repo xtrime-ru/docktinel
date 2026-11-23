@@ -9,27 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
-
-func TestAPIDurationRoundTrip(t *testing.T) {
-	task := testTask("dns", "check", "true")
-	task.Grace = 250 * time.Millisecond
-	wire, err := json.Marshal(task, durationMarshalers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(wire, []byte(`"timeout":1000000000`)) {
-		t.Fatal("duration no longer uses numeric nanoseconds:", string(wire))
-	}
-	var decoded Task
-	if err := json.Unmarshal(wire, &decoded, durationUnmarshalers); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(task, decoded) {
-		t.Fatalf("round trip changed task: %+v", decoded)
-	}
-}
 
 func TestJSONRejectsAmbiguousDocuments(t *testing.T) {
 	for name, document := range map[string]string{

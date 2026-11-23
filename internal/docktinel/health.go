@@ -26,7 +26,7 @@ func Evaluate(s Status, container string, now float64, maxAge time.Duration) (bo
 		return true, "watchdog heartbeat expired or invalid"
 	}
 	switch s.Phase {
-	case "configuring", "startup", "awaiting-main", "after-start":
+	case "configuring", "startup", "after-start":
 		if s.StartupDeadline <= 0 || now > s.StartupDeadline {
 			return true, "startup deadline exceeded"
 		}
@@ -53,6 +53,9 @@ type stopRecord struct {
 	Started   float64  `json:"started"`
 }
 
+// Keep watchdog failures distinct from an orderly Docker stop.
+const watchdogStopSignal = syscall.SIGUSR1
+
 // Escalation spans healthcheck invocations, so it never blocks Docker for the
 // shutdown grace period. Never signal PID 1, another container, or a reused PID.
 func emergencyStop(dir string, container string, target Identity, now float64, grace time.Duration) error {
@@ -74,7 +77,7 @@ func emergencyStop(dir string, container string, target Identity, now float64, g
 		if err := writeJSON(path, record); err != nil {
 			return err
 		}
-		return signalProcess(target, syscall.SIGTERM)
+		return signalProcess(target, watchdogStopSignal)
 	}
 	if now-record.Started >= grace.Seconds() {
 		return signalProcess(target, syscall.SIGKILL)
@@ -105,8 +108,7 @@ func healthcheck(dir string, maxAge, stopGrace, missingGrace time.Duration, noKi
 			}
 			return fmt.Errorf("watchdog state is missing or invalid: %w", statusErr)
 		}
-		// PID 1's direct child is the configured entrypoint/application under
-		// tini. A live, local identity is needed even if status.json is lost.
+		// Fall back to Docker init's child only if the identity was never published.
 		if age, ageErr := containerAge(now); ageErr == nil && age < missingGrace.Seconds() {
 			return errors.New("starting: state not published yet")
 		}
@@ -135,7 +137,7 @@ func healthcheck(dir string, maxAge, stopGrace, missingGrace time.Duration, noKi
 	}
 	if fatal && !noKill {
 		// An old container's state is never an authority for signalling.
-		target := s.Main
+		target := s.Daemon
 		if s.Container != container || !sameProcess(target) {
 			target, _ = initChild()
 		}

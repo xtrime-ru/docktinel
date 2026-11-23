@@ -29,7 +29,7 @@ func BenchmarkLoadConfig(b *testing.B) {
 			}
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := loadConfig(path, true); err != nil {
+				if _, err := loadConfig(path); err != nil {
 					b.Fatal(err)
 				}
 			}

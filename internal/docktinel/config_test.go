@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -46,7 +45,7 @@ func TestFileConfigDefaultsAndSafeENV(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
-	tasks, err := loadConfig(path, true)
+	tasks, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,53 +74,39 @@ func TestConfigValidation(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadConfig(path, true); err == nil {
+		if _, err := loadConfig(path); err == nil {
 			t.Fatalf("accepted %s", body)
 		}
 	}
 	if err := os.WriteFile(path, bytes.Repeat([]byte(" "), maxJSONSize+1), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadConfig(path, true); err == nil {
+	if _, err := loadConfig(path); err == nil {
 		t.Fatal("accepted oversized config")
 	}
 	missing := path + ".missing"
-	if _, err := loadConfig(missing, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadConfig(missing, true); err == nil {
+	if _, err := loadConfig(missing); err == nil {
 		t.Fatal("explicit missing config accepted")
 	}
 }
 
 func TestConfigPathPrecedence(t *testing.T) {
 	t.Setenv("DOCKTINEL_CONFIG", "")
-	if path, required := configPath(""); path != DefaultConfig || required {
-		t.Fatal(path, required)
+	if path := configPath(""); path != DefaultConfig {
+		t.Fatal(path)
 	}
 	t.Setenv("DOCKTINEL_CONFIG", "/env/config.json")
-	if path, required := configPath(""); path != "/env/config.json" || !required {
-		t.Fatal(path, required)
+	if path := configPath(""); path != "/env/config.json" {
+		t.Fatal(path)
 	}
-	if path, required := configPath("/flag/config.json"); path != "/flag/config.json" || !required {
-		t.Fatal(path, required)
-	}
-}
-
-func TestStartupBudgetResetsRegistrationDeadline(t *testing.T) {
-	d := testDaemon(t)
-	before := d.snapshot().StartupDeadline
-	if err := d.startup(20 * time.Second); err != nil {
-		t.Fatal(err)
-	}
-	s := d.snapshot()
-	if s.StartupDeadline >= before || s.StartupDeadline-s.Heartbeat > 20.1 {
-		t.Fatal(s)
+	if path := configPath("/flag/config.json"); path != "/flag/config.json" {
+		t.Fatal(path)
 	}
 }
 
 func TestGlobalStartupBudgetBoundsOptionalTask(t *testing.T) {
 	d := testDaemon(t)
+	d.status.StartupDeadline -= (time.Minute - 100*time.Millisecond).Seconds()
 	task := testTask("slow", "job", "sleep 5")
 	task.Phase = "startup"
 	task.Timeout, task.Deadline = 10*time.Second, 10*time.Second
@@ -129,7 +114,7 @@ func TestGlobalStartupBudgetBoundsOptionalTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	if err := d.startup(100 * time.Millisecond); err == nil {
+	if err := d.startup(); err == nil {
 		t.Fatal("global deadline was ignored for optional task")
 	}
 	if time.Since(start) > time.Second {
@@ -137,36 +122,15 @@ func TestGlobalStartupBudgetBoundsOptionalTask(t *testing.T) {
 	}
 }
 
-func TestStartupAliasHelpAndInvalidENV(t *testing.T) {
-	t.Setenv("DOCKTINEL_STARTUP_TIMEOUT", "invalid")
-	for _, name := range []string{"startup", "exec"} {
-		var out, stderr bytes.Buffer
-		if CLI([]string{name, "--help"}, &out, &stderr, "test") != 0 {
-			t.Fatal(stderr.String())
-		}
-		stderr.Reset()
-		if CLI([]string{name}, &out, &stderr, "test") == 0 || !strings.Contains(stderr.String(), "DOCKTINEL_STARTUP_TIMEOUT") {
-			t.Fatal(stderr.String())
-		}
-		stderr.Reset()
-		// An explicit timeout overrides invalid ENV and validates before launch.
-		if CLI([]string{name, "--timeout", "0s"}, &out, &stderr, "test") == 0 || strings.Contains(stderr.String(), "DOCKTINEL_STARTUP_TIMEOUT") {
-			t.Fatal(stderr.String())
-		}
-	}
-}
-
 func TestAfterStartSharesOriginalBudget(t *testing.T) {
 	d := testDaemon(t)
+	d.status.StartupDeadline -= (time.Minute - 100*time.Millisecond).Seconds()
 	task := testTask("ready", "check", "sleep 5")
 	task.Phase = "after-start"
 	if err := d.add(&task); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.startup(100 * time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.runPhase("after-start", d.tasks); err != context.DeadlineExceeded {
+	if err := d.startup(); err != context.DeadlineExceeded {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -204,7 +168,7 @@ func TestTypedConfigPreservesExplicitValues(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
-	tasks, err := loadConfig(path, true)
+	tasks, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +192,7 @@ func TestTypedConfigRejectsInvalidOptionalValues(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadConfig(path, true); err == nil {
+		if _, err := loadConfig(path); err == nil {
 			t.Fatalf("accepted %s", body)
 		}
 	}

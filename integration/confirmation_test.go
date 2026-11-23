@@ -9,11 +9,13 @@ import (
 
 func TestValidateAndConfirmedRecovery(t *testing.T) {
 	f := newFixture(t, `
-		printf '%s' '{"tasks":[{"kind":"check","name":"dns","phase":"both","interval":"100ms","successes":2,"failure":"degrade","command":["test","-f","/tmp/available"]}]}' > "$DOCKTINEL_CONFIG"
+		rm "$DOCKTINEL_CONFIG"
+		docktinel add check dns --phase both --interval 100ms --successes 2 \
+			--failure degrade -- test -f /tmp/available
 		docktinel config validate
 		test ! -e /run/docktinel/control.sock
 		touch /tmp/available
-		exec docktinel startup --timeout 10s -- demo wait
+		exec docktinel daemon --timeout 10s
 	`)
 	f.runtime()
 	type confirmationStatus struct {

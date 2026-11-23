@@ -13,12 +13,17 @@ func TestCLIHelpAndUsage(t *testing.T) {
 		code int
 		want string
 	}{
-		{[]string{"startup", "--help"}, 0, "Usage:"},
+		{[]string{"daemon", "--help"}, 0, "Usage:"},
 		{[]string{"version", "--help"}, 0, "Show build version"},
-		{[]string{"help", "add", "check"}, 0, "--timeout"},
+		{[]string{"help", "daemon"}, 0, "--timeout"},
 		{[]string{"restart"}, 1, "required flag --reason"},
+		{[]string{"daemon"}, 1, "DOCKTINEL_STARTUP_TIMEOUT"},
+		{[]string{"help", "add", "check"}, 0, "--config"},
 		{[]string{"add", "check"}, 1, "task NAME is required"},
 		{[]string{"add", "check", "dns"}, 1, "command is required"},
+		{[]string{"startup"}, 1, "unknown command"},
+		{[]string{"exec"}, 1, "command is required"},
+		{[]string{"exec", "--help"}, 0, "-- COMMAND"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			var out, stderr bytes.Buffer

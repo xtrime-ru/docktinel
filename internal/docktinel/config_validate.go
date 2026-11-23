@@ -29,9 +29,9 @@ func configCLI(args []string, out io.Writer) error {
 	if err := u.parse(args[1:], false); err != nil {
 		return err
 	}
-	path, _ := configPath(*pathFlag)
+	path := configPath(*pathFlag)
 	// Validation always requires a file, including at the default path.
-	tasks, err := loadConfig(path, true)
+	tasks, err := loadConfig(path)
 	if err != nil {
 		return err
 	}

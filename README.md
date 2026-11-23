@@ -7,7 +7,7 @@
 </p>
 <!-- /Docktinel brand -->
 
-A lightweight sentinel for Docker containers: startup checks, background jobs, helper process supervision, and a watchdog-aware healthcheck. Written in Go with no external runtime dependencies. Configure tasks with JSON or CLI commands.
+A lightweight sentinel for Docker containers: startup checks, background jobs, helper process supervision, and a watchdog-aware healthcheck. Written in Go with no external runtime dependencies. Configure tasks with JSON or `docktinel add`.
 
 ## Contents
 
@@ -41,11 +41,9 @@ FROM ghcr.io/xtrime-ru/docktinel:latest AS sentinel
 FROM your-application:tag
 COPY --from=sentinel /usr/local/bin/docktinel /usr/local/bin/docktinel
 COPY docktinel.json /etc/docktinel/config.json
-ENV TINI_KILL_PROCESS_GROUP=1
 HEALTHCHECK --interval=10s --timeout=5s --start-period=2m --retries=3 \
   CMD ["docktinel", "healthcheck"]
-ENTRYPOINT ["docktinel", "startup", "--"]
-CMD ["application", "--foreground"]
+ENTRYPOINT ["docktinel", "daemon"]
 ```
 
 `docktinel.json`:
@@ -60,6 +58,13 @@ CMD ["application", "--foreground"]
       "command": ["/usr/local/bin/check-dependency", "${DEPENDENCY_HOST}"],
       "timeout": "5s",
       "interval": "5s"
+    },
+    {
+      "kind": "process",
+      "name": "application",
+      "phase": "startup",
+      "on_exit": "restart-container",
+      "command": ["application", "--foreground"]
     }
   ]
 }
@@ -75,19 +80,19 @@ CMD ["application", "--foreground"]
 | `job` | Run a one-shot or periodic command | Report degraded state and retry |
 | `process` | Supervise a foreground helper | Restart the helper after exit |
 
-The daemon loads the config; `startup` runs startup tasks before replacing itself with the application. Failed startup tasks retry within their deadlines. After-start checks then verify readiness; runtime tasks begin once those finish. The default **2-minute budget** covers startup, main attachment, and after-start readiness. Set `DOCKTINEL_STARTUP_TIMEOUT` or `startup --timeout` to change it. `exec` is an alias for `startup`.
+Docktinel loads the config and runs startup tasks in order. After-start checks
+verify readiness before runtime tasks begin. The default **2-minute budget**
+covers startup and readiness. Set `DOCKTINEL_STARTUP_TIMEOUT` or
+`daemon --timeout` to change it.
 
-For a setup without a file, start the daemon explicitly and register tasks before startup:
+The daemon reads the config once. To change tasks, update the file and restart
+the container. Use `DOCKTINEL_CONFIG` to select another file and `${VAR}` or
+`${VAR:-default}` for ENV substitution.
 
-```sh
-#!/bin/sh
-set -eu
-docktinel daemon &
-docktinel add check dependency --phase both --interval 5s -- /opt/bin/check-dependency
-exec docktinel startup -- "$@"
-```
-
-Config tasks load before CLI registrations; names must be unique across both. Configuration is read once, with no automatic reload. Use `DOCKTINEL_CONFIG` to select another file and `${VAR}` / `${VAR:-default}` for ENV substitution. Commands are argument arrays; use an explicit `sh -c` for shell syntax.
+Use `docktinel add` to create the file or add and update tasks before launch, for example
+in a Dockerfile or an entrypoint. It accepts the same task options as the JSON
+config. Pass an application command directly with `docktinel exec -- COMMAND`.
+See [CLI configuration](docs/configuration.md#configure-with-the-cli).
 
 Validate JSON, ENV substitutions and task settings without starting a daemon or executing commands:
 
@@ -99,17 +104,17 @@ See [configuration and ENV](docs/configuration.md) and the [command reference](d
 
 ## Health and recovery
 
-Checks return zero on success and nonzero on failure. A success resets the failure counter; `--successes N` can require a streak before readiness or recovery is confirmed. Optional checks and jobs use `--failure degrade` to keep the application running through failures. Jobs and helpers retry with capped exponential backoff and jitter. Jobs never overlap with themselves; `--lock NAME` serializes related tasks. See [retry and process policies](docs/commands.md#register-a-task) for details.
+Checks return zero on success and nonzero on failure. A success resets the failure counter; `successes` can require a streak before readiness or recovery is confirmed. Optional checks and jobs use `"failure": "degrade"` to keep the application running through failures. Jobs and helpers retry with capped exponential backoff and jitter. Jobs never overlap with themselves; `lock` serializes related tasks. See [retry and process policies](docs/commands.md#task-options) for details.
 
-Docker healthcheck reads an atomic state file independently of the daemon's API. It checks heartbeat freshness, process/container identity and critical deadlines. If the daemon dies or stalls, healthcheck sends TERM to the application; a later probe escalates to KILL after the grace period. Keep probes running for this protection to work.
+Docker healthcheck reads an atomic state file independently of the daemon's API. It checks heartbeat freshness, process/container identity and critical deadlines. On a critical watchdog fault, healthcheck signals Docktinel to shut down with a failure exit code. A later probe escalates to KILL after the grace period. Keep probes running for this protection to work.
 
 | State | Docker healthcheck |
 | --- | --- |
 | Starting or stopping | Fails; allows the configured deadline/grace period |
 | Fresh healthy or degraded runtime | Passes; optional failures do not cause restart loops |
-| Stale watchdog or overdue critical task | Fails and initiates application termination |
+| Stale watchdog or overdue critical task | Fails and initiates daemon shutdown |
 
-**Docker does not restart a container merely because it is unhealthy.** Docktinel stops the application on critical failure, and Docker's restart policy brings the container back. Docker's healthcheck start period suppresses status penalties; probes and their side effects still run.
+**Docker does not restart a container merely because it is unhealthy.** Docktinel shuts down on critical failure, and Docker's restart policy brings the container back. Docker's healthcheck start period suppresses status penalties; probes and their side effects still run.
 
 Inspect live state or diagnose health without sending signals:
 
@@ -133,10 +138,10 @@ services:
     stop_grace_period: 30s
 ```
 
-- Init must launch the entrypoint directly. In a shell entrypoint, use `exec docktinel startup -- ...` to preserve the main PID. Docktinel uses the system `exec` call and does not implement another init.
-- Run daemon, CLI and healthcheck as the same user, with permission to signal the application. For non-root images, set `DOCKTINEL_RUNTIME_DIR` to a writable private directory; the default is `/run/docktinel`. Keep it ephemeral and consistent across invocations.
+- Docktinel must be the direct child of Docker init. In a shell entrypoint, finish preparation with `exec docktinel daemon` or `exec docktinel exec -- application`.
+- Run daemon, CLI and healthcheck as the same user, with permission to signal the daemon. For non-root images, set `DOCKTINEL_RUNTIME_DIR` to a writable private directory; the default is `/run/docktinel`. Keep it ephemeral and consistent across invocations.
 - Helpers must stay in the foreground. Task cancellation terminates their process groups. Keep the control socket private; Docktinel does not need the Docker socket.
-- On a Docktinel-initiated stop, shutdown jobs run before application termination. During external `docker stop`, hooks are **best effort**: mandatory cleanup belongs in the application's shutdown handler. Match Docker's stop grace to your [shutdown budgets](docs/commands.md#daemon-and-lifecycle).
+- When Docker sends TERM, Docktinel cancels running tasks and finishes its shutdown jobs before exiting. Set the container stop timeout to cover [task cancellation and shutdown jobs](docs/commands.md#daemon-and-lifecycle).
 
 ## Images and builds
 
@@ -156,9 +161,9 @@ Source builds and tests require **Go 1.27+**. Docker builds include the toolchai
 ## Documentation
 
 - [Command reference](docs/commands.md): task options, retries, shutdown and recovery.
-- [Configuration and ENV](docs/configuration.md): schema, substitution and startup modes.
+- [Configuration and ENV](docs/configuration.md): schema, substitution and startup.
 - [Local HTTP API](docs/api.md): control over a private Unix socket; healthcheck remains independent.
-- [HTTP demo with JSON configuration](examples/basic/README.md) and [AdGuard Home with CLI registration](examples/adguard/README.md).
+- [HTTP demo with JSON configuration](examples/basic/README.md) and [AdGuard Home configured via CLI](examples/adguard/README.md).
 - [Contributing](CONTRIBUTING.md): development setup and test commands.
 
 ## License

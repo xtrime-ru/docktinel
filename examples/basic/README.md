@@ -54,4 +54,4 @@ docker compose -f examples/basic/compose.yml up -d --force-recreate --no-build
 docker compose -f examples/basic/compose.yml down
 ```
 
-`make integration` tests isolated containers without published ports, including critical failure, optional dependency recovery and TERM/KILL escalation when the watchdog is frozen. See [Contributing](../../CONTRIBUTING.md) for test requirements.
+`make integration` tests isolated containers without published ports, including critical failure, optional dependency recovery and shutdown signal and KILL escalation when the watchdog is frozen. See [Contributing](../../CONTRIBUTING.md) for test requirements.

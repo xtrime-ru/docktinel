@@ -18,14 +18,14 @@ const (
 
 var taskName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$`)
 
-// Task is registered over the local socket. Commands are argv, never implicit shell.
+// Task is a configured check, job, or process. Commands are argv.
 type Task struct {
 	Name      string        `json:"name"`
 	Kind      string        `json:"kind"`
 	Phase     string        `json:"phase"`
 	Command   []string      `json:"command"`
-	Env       []string      `json:"env"`
-	Dir       string        `json:"dir"`
+	Env       []string      `json:"-"`
+	Dir       string        `json:"-"`
 	Interval  time.Duration `json:"interval"`
 	Timeout   time.Duration `json:"timeout"`
 	Deadline  time.Duration `json:"deadline"`
@@ -146,8 +146,4 @@ type apiError struct {
 
 type restartRequest struct {
 	Reason string `json:"reason"`
-}
-
-type startupRequest struct {
-	Timeout time.Duration `json:"timeout"`
 }

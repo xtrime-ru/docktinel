@@ -36,6 +36,11 @@ type fixture struct {
 
 func newFixture(t *testing.T, script string, env ...string) *fixture {
 	t.Helper()
+	return newFixtureWithInit(t, true, script, env...)
+}
+
+func newFixtureWithInit(t *testing.T, init bool, script string, env ...string) *fixture {
+	t.Helper()
 	cli, err := client.New(client.FromEnv)
 	if err != nil {
 		t.Fatal(err)
@@ -47,9 +52,8 @@ func newFixture(t *testing.T, script string, env ...string) *fixture {
 	}
 	cfg := &container.Config{Image: image, Env: env}
 	if script != "" {
-		cfg.Entrypoint = []string{"sh", "-ec", script}
 		cfg.Cmd = []string{}
-		// Script fixtures exercise the imperative mode without the demo config.
+		// Script fixtures can supply their own config.
 		cfg.Env = append(cfg.Env, "DOCKTINEL_CONFIG=/tmp/test-config.json")
 		script = "printf '%s' '{\"tasks\":[]}' > /tmp/test-config.json\n" + script
 		cfg.Entrypoint = []string{"sh", "-ec", script}
@@ -58,7 +62,7 @@ func newFixture(t *testing.T, script string, env ...string) *fixture {
 	defer cancel()
 	created, err := cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "docktinel-test-" + uuid.New().String(), Config: cfg,
-		HostConfig: &container.HostConfig{Init: new(true)},
+		HostConfig: &container.HostConfig{Init: &init},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -254,12 +258,62 @@ func TestRestartRequestStopsContainer(t *testing.T) {
 	}
 }
 
+func TestForegroundDaemonCompletesShutdownJobs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int64
+	}{
+		{"docker stop", 0},
+		{"docktinel restart", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, `
+cat > "$DOCKTINEL_CONFIG" <<'JSON'
+{
+  "tasks": [
+    {"kind":"process","name":"application","phase":"startup","command":["sh","-ec","trap 'echo application-stopped; exit 0' TERM; touch /tmp/main-ready; sleep infinity & wait"],"on_exit":"restart-container"},
+    {"kind":"check","name":"ready","phase":"after-start","interval":"100ms","command":["test","-f","/tmp/main-ready"]},
+    {"kind":"job","name":"cleanup","phase":"shutdown","timeout":"2s","command":["sh","-ec","sleep 0.3; echo shutdown-complete"]}
+  ]
+}
+JSON
+exec docktinel daemon
+`)
+			f.runtime()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			if tc.code == 0 {
+				if _, err := f.cli.ContainerStop(ctx, f.id, client.ContainerStopOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				f.mustExec("docktinel", "restart", "--reason", "foreground integration test")
+			}
+			if got := f.waitExit(); got != tc.code {
+				t.Fatalf("container exit code = %d, want %d", got, tc.code)
+			}
+			logs, err := f.cli.ContainerLogs(ctx, f.id, client.ContainerLogsOptions{ShowStdout: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer logs.Close()
+			var output bytes.Buffer
+			if _, err := stdcopy.StdCopy(&output, &output, logs); err != nil {
+				t.Fatal(err)
+			}
+			log := output.String()
+			stopped, cleaned := strings.Index(log, "application-stopped"), strings.Index(log, "shutdown-complete")
+			if stopped < 0 || cleaned <= stopped || strings.Count(log, "shutdown-complete") != 1 {
+				t.Fatalf("application and shutdown job did not finish in order: %s", log)
+			}
+		})
+	}
+}
+
 func TestDegradedDependencyRecovers(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms &
-		docktinel add check optional --phase both --deadline 200ms --interval 100ms \
-			--failure degrade -- test -f /tmp/available
-		exec docktinel startup --timeout 10s -- demo wait
+		printf '%s' '{"tasks":[{"kind":"check","name":"optional","phase":"both","deadline":"200ms","interval":"100ms","failure":"degrade","command":["test","-f","/tmp/available"]}]}' > "$DOCKTINEL_CONFIG"
+		exec docktinel daemon --heartbeat 100ms
 	`)
 	f.runtime()
 	eventually(t, f.status, func(s sentinelStatus) bool { return s.State == "degraded" })
@@ -270,33 +324,30 @@ func TestDegradedDependencyRecovers(t *testing.T) {
 
 func TestStartupDeadlineStopsUnfinishedEntrypoint(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms --stop-grace 200ms &
-		docktinel add job blocked --phase startup --timeout 1m -- sleep 600
-		exec docktinel startup --timeout 300ms -- demo wait
+		printf '%s' '{"tasks":[{"kind":"job","name":"blocked","phase":"startup","timeout":"1m","command":["sleep","600"]}]}' > "$DOCKTINEL_CONFIG"
+		exec docktinel daemon --heartbeat 100ms --stop-grace 200ms --timeout 300ms
 	`)
 	f.waitExit()
 }
 
-func TestLostSnapshotStopsMain(t *testing.T) {
-	f := newFixture(t, "")
-	s := f.runtime()
-	f.mustExec("kill", "-STOP", strconv.Itoa(s.Daemon.PID))
+func TestMissingSnapshotRequestsFailedExit(t *testing.T) {
+	f := newFixture(t, `exec docktinel daemon --heartbeat 1h`)
+	f.runtime()
 	f.mustExec("rm", "/run/docktinel/status.json")
-	f.expectUnhealthy()
-	f.waitExit()
+	// The container can stop as soon as healthcheck signals the daemon.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, _, _ = f.exec(ctx, "docktinel", "healthcheck")
+	if code := f.waitExit(); code != 1 {
+		t.Fatalf("expected watchdog failure exit 1, got %d", code)
+	}
 }
 
-func TestFrozenWatchdogEscalatesTERMToKILL(t *testing.T) {
+func TestFrozenWatchdogEscalatesToKILL(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms --stop-grace 200ms &
-		exec docktinel startup --timeout 10s -- demo wait --ignore-term
+		exec docktinel daemon --heartbeat 100ms --stop-grace 200ms --timeout 10s
 	`)
 	s := f.runtime()
-	// The fixture writes this only after installing its TERM handler.
-	eventually(t, func(ctx context.Context) (int, error) {
-		_, code, err := f.exec(ctx, "test", "-f", "/tmp/main-ready")
-		return code, err
-	}, func(code int) bool { return code == 0 })
 	f.mustExec("kill", "-STOP", strconv.Itoa(s.Daemon.PID))
 	// Wait for the actual stale-heartbeat condition rather than sleeping an
 	// arbitrary duration. The snapshot remains readable while the daemon is frozen.
@@ -312,7 +363,7 @@ func TestFrozenWatchdogEscalatesTERMToKILL(t *testing.T) {
 	defer cancel()
 	state, err := f.cli.ContainerInspect(ctx, f.id, client.ContainerInspectOptions{})
 	if err != nil || !state.Container.State.Running {
-		t.Fatalf("TERM grace was not respected: %v", err)
+		t.Fatalf("watchdog stop grace was not respected: %v", err)
 	}
 	// Repeated probes exercise escalation across independent invocations.
 	eventually(t, func(ctx context.Context) (bool, error) {
@@ -337,35 +388,77 @@ func TestDefaultConfigAndENV(t *testing.T) {
 	f.mustExec("docktinel", "healthcheck")
 }
 
-func TestAutoStartExecAliasWithConfigENV(t *testing.T) {
+func TestExecStartsApplicationAfterConfiguredStartup(t *testing.T) {
 	f := newFixture(t, `
 		printf '%s' '{"tasks":[{"kind":"job","name":"env","phase":"startup","command":["touch","${MARKER}"]}]}' > "$DOCKTINEL_CONFIG"
-		exec docktinel exec --timeout 10s -- demo wait
+		exec docktinel exec --timeout 10s -- sh -ec 'test -f "$MARKER"; touch /tmp/application-started; exec sleep 600'
 	`, "MARKER=/tmp/from-config")
 	f.runtime()
-	f.mustExec("test", "-f", "/tmp/from-config")
+	eventually(t, func(ctx context.Context) (int, error) {
+		_, code, err := f.exec(ctx, "test", "-f", "/tmp/application-started")
+		return code, err
+	}, func(code int) bool { return code == 0 })
 }
 
-func TestCheckOnlyStartupThenExec(t *testing.T) {
-	f := newFixture(t, `
-		docktinel startup --timeout 10s
-		docktinel status --json > /tmp/before-attach.json
-		exec docktinel exec -- demo wait
-	`)
+func TestAddUpdatesConfigForNextLaunch(t *testing.T) {
+	f := newFixture(t, "")
 	f.runtime()
-	if output := f.mustExec("cat", "/tmp/before-attach.json"); !strings.Contains(output, "awaiting-main") {
-		t.Fatalf("check-only startup did not finish: %s", output)
+	f.mustExec("docktinel", "add", "job", "next-start", "--phase", "startup", "--",
+		"sh", "-c", `printf '%s' "$1" > /tmp/config-added`, "sh", "${literal}")
+	f.mustExec("test", "!", "-e", "/tmp/config-added")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	_, _, _ = f.exec(ctx, "docktinel", "restart", "--reason", "configuration updated")
+	if code := f.waitExit(); code != 1 {
+		t.Fatalf("restart exit = %d, want 1", code)
+	}
+	if _, err := f.cli.ContainerStart(ctx, f.id, client.ContainerStartOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.runtime()
+	if got := f.mustExec("cat", "/tmp/config-added"); got != "${literal}" {
+		t.Fatalf("CLI argument changed after reloading the config: %q", got)
 	}
 }
 
-func TestConfigDuplicateWithAddFails(t *testing.T) {
+func TestEntrypointCanAddAndUpdateTaskAfterRestart(t *testing.T) {
 	f := newFixture(t, `
-		printf '%s' '{"tasks":[{"kind":"job","name":"one","command":["true"]}]}' > "$DOCKTINEL_CONFIG"
-		docktinel daemon &
-		if docktinel add job one -- true; then exit 42; fi
-		exec docktinel startup --timeout 10s -- demo wait
+		export DOCKTINEL_CONFIG=/tmp/bootstrap.json
+		label=original
+		if [ -f /tmp/label ]; then label="$(cat /tmp/label)"; fi
+		docktinel add job prepare --phase startup -- sh -c 'echo "$1" >> /tmp/prepared' sh "$label"
+		docktinel add job verify --phase startup -- sh -c 'echo verified >> /tmp/prepared'
+		exec docktinel daemon
 	`)
 	f.runtime()
+	before := f.mustExec("cat", "/tmp/bootstrap.json")
+
+	restart := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		if _, err := f.cli.ContainerStop(ctx, f.id, client.ContainerStopOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.cli.ContainerStart(ctx, f.id, client.ContainerStartOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		f.runtime()
+	}
+	restart()
+	if after := f.mustExec("cat", "/tmp/bootstrap.json"); after != before {
+		t.Fatal("repeating the same add changed the config file")
+	}
+
+	f.mustExec("sh", "-ec", "echo updated > /tmp/label")
+	restart()
+	if got := f.mustExec("cat", "/tmp/prepared"); got != "original\nverified\noriginal\nverified\nupdated\nverified\n" {
+		t.Fatalf("startup job did not run once per launch with the latest settings: %q", got)
+	}
+	if got := f.mustExec("docktinel", "config", "validate", "--config", "/tmp/bootstrap.json"); !strings.Contains(got, "tasks: 2") {
+		t.Fatalf("add did not preserve one task with this name: %q", got)
+	}
 }
 
 func TestConfigErrorsPreventApplicationLaunch(t *testing.T) {
@@ -374,7 +467,7 @@ func TestConfigErrorsPreventApplicationLaunch(t *testing.T) {
 		`{"tasks":[],"unknown":true}`,
 	} {
 		t.Run(config, func(t *testing.T) {
-			f := newFixture(t, "printf '%s' '"+config+"' > \"$DOCKTINEL_CONFIG\"\nexec docktinel startup -- demo wait")
+			f := newFixture(t, "printf '%s' '"+config+"' > \"$DOCKTINEL_CONFIG\"\nexec docktinel daemon")
 			if code := f.waitExit(); code == 0 {
 				t.Fatal("invalid config allowed successful startup")
 			}
@@ -382,56 +475,10 @@ func TestConfigErrorsPreventApplicationLaunch(t *testing.T) {
 	}
 }
 
-func TestFrozenDaemonIsNotReplacedByStartup(t *testing.T) {
-	f := newFixture(t, "")
-	s := f.runtime()
-	f.mustExec("kill", "-STOP", strconv.Itoa(s.Daemon.PID))
-	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
-	defer cancel()
-	_, code, err := f.exec(ctx, "docktinel", "startup", "--timeout", "1s")
-	if code == 0 || err == nil {
-		t.Fatal("startup should report a live but unresponsive daemon")
-	}
-	output := f.mustExec("cat", "/run/docktinel/status.json")
-	var snapshot sentinelStatus
-	if err := json.Unmarshal([]byte(output), &snapshot); err != nil || snapshot.Daemon.PID != s.Daemon.PID {
-		t.Fatalf("daemon identity changed: %+v, %v", snapshot, err)
-	}
-	// Resume before normal cleanup so it can reap its child processes.
-	f.mustExec("kill", "-CONT", strconv.Itoa(s.Daemon.PID))
-}
-
-func TestConcurrentStartupLaunchesSingleDaemon(t *testing.T) {
-	f := newFixture(t, `
-		docktinel startup --timeout 10s > /tmp/start-one 2>&1 & one=$!
-		docktinel startup --timeout 10s > /tmp/start-two 2>&1 & two=$!
-		if wait "$one"; then a=0; else a=1; fi
-		if wait "$two"; then b=0; else b=1; fi
-		test "$((a+b))" -eq 1
-		exec docktinel startup -- demo wait
-	`)
-	f.runtime()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	processes, err := f.cli.ContainerTop(ctx, f.id, client.ContainerTopOptions{Arguments: []string{"-eo", "pid,comm,args"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := 0
-	for _, process := range processes.Processes {
-		if len(process) == 3 && process[1] == "docktinel" && strings.Contains(process[2], " daemon ") {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("expected one daemon, got %d: %+v", count, processes)
-	}
-}
-
 func TestStartupTimeoutENVAndCLIOverride(t *testing.T) {
 	f := newFixture(t, `
 		printf '%s' '{"tasks":[{"kind":"job","name":"slow","phase":"startup","command":["sleep","0.2"]}]}' > "$DOCKTINEL_CONFIG"
-		exec docktinel startup --timeout 10s -- demo wait
+		exec docktinel daemon --timeout 10s
 	`, "DOCKTINEL_STARTUP_TIMEOUT=invalid")
 	f.runtime()
 }
@@ -439,41 +486,65 @@ func TestStartupTimeoutENVAndCLIOverride(t *testing.T) {
 func TestMissingExplicitConfigFailsStartup(t *testing.T) {
 	f := newFixture(t, `
 		export DOCKTINEL_CONFIG=/tmp/does-not-exist.json
-		exec docktinel startup -- demo wait
+		exec docktinel daemon
 	`)
 	if code := f.waitExit(); code == 0 {
 		t.Fatal("missing explicit config did not fail startup")
 	}
 }
 
-func TestStartupAndExecRejectMissingDefaultConfig(t *testing.T) {
+func TestDaemonRejectsMissingDefaultConfig(t *testing.T) {
 	f := newFixture(t, `
 		rm -f /etc/docktinel/config.json
 		unset DOCKTINEL_CONFIG
-		for command in startup exec; do
-			if docktinel "$command"; then exit 42; fi
-			if docktinel "$command" -- demo wait; then exit 42; fi
-			test ! -e /run/docktinel/control.sock
-			test ! -e /run/docktinel/status.json
-		done
+		exec docktinel daemon
 	`)
-	if code := f.waitExit(); code != 0 {
-		t.Fatalf("no-config startup checks exited %d", code)
+	if code := f.waitExit(); code == 0 {
+		t.Fatal("missing default config did not fail startup")
 	}
 }
 
-func TestExplicitDaemonSupportsCLIWithoutConfig(t *testing.T) {
+func TestDaemonRequiresDockerInit(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+	}{
+		{"daemon as PID 1", "exec docktinel daemon"},
+		{"exec as PID 1", "exec docktinel exec -- true"},
+		{"shell as PID 1", "docktinel daemon\nexit 42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixtureWithInit(t, false, tc.script)
+			if code := f.waitExit(); code != 1 {
+				t.Fatalf("startup without Docker init exited with code %d, want 1", code)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			logs, err := f.cli.ContainerLogs(ctx, f.id, client.ContainerLogsOptions{ShowStderr: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer logs.Close()
+			var output bytes.Buffer
+			if _, err := stdcopy.StdCopy(&output, &output, logs); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(output.String(), "Use init: true in Compose or docker run --init") {
+				t.Fatalf("missing Docker init diagnostic: %s", &output)
+			}
+		})
+	}
+}
+
+func TestDaemonRejectsBackgroundLaunch(t *testing.T) {
 	f := newFixture(t, `
-		rm -f /etc/docktinel/config.json
-		unset DOCKTINEL_CONFIG
-		docktinel daemon --heartbeat 100ms &
-		docktinel add job marker --phase startup -- touch /tmp/registered-with-add
-		docktinel startup --timeout 10s
-		exec docktinel exec -- demo wait
+		docktinel daemon &
+		if wait "$!"; then exit 42; fi
+		test ! -e /run/docktinel/control.sock
+		test ! -e /run/docktinel/status.json
 	`)
-	f.runtime()
-	f.mustExec("test", "-f", "/tmp/registered-with-add")
-	f.mustExec("docktinel", "healthcheck")
+	if code := f.waitExit(); code != 0 {
+		t.Fatalf("background launch checks exited %d", code)
+	}
 }
 
 func TestClientCommandsFailWithoutDaemonEvenWithConfig(t *testing.T) {
@@ -486,7 +557,6 @@ func TestClientCommandsFailWithoutDaemonEvenWithConfig(t *testing.T) {
 	}, func(code int) bool { return code == 0 })
 	for _, args := range [][]string{
 		{"status", "--json"},
-		{"add", "job", "unused", "--", "true"},
 		{"restart", "--reason", "must not launch a daemon"},
 		{"healthcheck", "--no-kill"},
 	} {
@@ -503,10 +573,10 @@ func TestClientCommandsFailWithoutDaemonEvenWithConfig(t *testing.T) {
 
 func TestHelperRestartsWithoutRestartingContainer(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms &
-		docktinel add process helper --failure restart-container --on-exit restart \
-			-- sh -c 'echo started >> /tmp/helper-starts; if [ -e /tmp/helper-once ]; then exec sleep 600; fi; touch /tmp/helper-once'
-		exec docktinel startup --timeout 10s -- demo wait
+		cat > "$DOCKTINEL_CONFIG" <<'JSON'
+{"tasks":[{"kind":"process","name":"helper","failure":"restart-container","on_exit":"restart","command":["sh","-c","echo started >> /tmp/helper-starts; if [ -e /tmp/helper-once ]; then exec sleep 600; fi; touch /tmp/helper-once"]}]}
+JSON
+		exec docktinel daemon --heartbeat 100ms
 	`)
 	f.runtime()
 	eventually(t, func(ctx context.Context) (int, error) {
@@ -522,10 +592,8 @@ func TestHelperRestartsWithoutRestartingContainer(t *testing.T) {
 
 func TestCriticalHelperStopsContainerOnSuccessfulExit(t *testing.T) {
 	f := newFixture(t, `
-		docktinel daemon --heartbeat 100ms &
-		docktinel add process helper --on-exit restart-container \
-			-- sh -c 'while [ ! -e /tmp/release-helper ]; do sleep 0.1; done'
-		exec docktinel startup --timeout 10s -- demo wait
+		printf '%s' '{"tasks":[{"kind":"process","name":"helper","on_exit":"restart-container","command":["sh","-c","while [ ! -e /tmp/release-helper ]; do sleep 0.1; done"]}]}' > "$DOCKTINEL_CONFIG"
+		exec docktinel daemon --heartbeat 100ms
 	`)
 	f.runtime()
 	f.mustExec("touch", "/tmp/release-helper")

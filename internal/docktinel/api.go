@@ -3,7 +3,6 @@ package docktinel
 import (
 	"bytes"
 	"context"
-	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -19,35 +18,6 @@ func (d *Daemon) controlServer() *http.Server {
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusOK, d.snapshot())
 	})
-	mux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
-		task := Task{Successes: 1}
-		if !decodeAPI(w, r, &task) {
-			return
-		}
-		if err := task.Validate(); err != nil {
-			writeAPI(w, http.StatusBadRequest, apiError{err.Error()})
-			return
-		}
-		finishAPI(w, d.add(&task))
-	})
-	mux.HandleFunc("POST /v1/startup", func(w http.ResponseWriter, r *http.Request) {
-		req := startupRequest{Timeout: defaultStartupTimeout}
-		if !decodeAPI(w, r, &req) {
-			return
-		}
-		if req.Timeout <= 0 {
-			writeAPI(w, http.StatusBadRequest, apiError{"startup timeout must be positive"})
-			return
-		}
-		// The daemon enforces this budget even if the client disconnects.
-		finishAPI(w, d.startup(req.Timeout))
-	})
-	mux.HandleFunc("POST /v1/main", func(w http.ResponseWriter, r *http.Request) {
-		var main Identity
-		if decodeAPI(w, r, &main) {
-			finishAPI(w, d.attach(&main))
-		}
-	})
 	mux.HandleFunc("POST /v1/restart", func(w http.ResponseWriter, r *http.Request) {
 		var req restartRequest
 		if !decodeAPI(w, r, &req) {
@@ -57,21 +27,20 @@ func (d *Daemon) controlServer() *http.Server {
 			writeAPI(w, http.StatusBadRequest, apiError{"restart requires a reason"})
 			return
 		}
+		writeAPI(w, http.StatusOK, struct{}{})
+		_ = http.NewResponseController(w).Flush()
 		d.stop(req.Reason, true)
-		finishAPI(w, nil)
 	})
 	return &http.Server{
 		Handler: mux, ReadHeaderTimeout: apiTimeout,
 		ReadTimeout: apiTimeout, IdleTimeout: 30 * time.Second,
 		MaxHeaderBytes: 16 << 10,
-		// No global WriteTimeout: startup can take minutes. writeAPI applies
-		// a deadline only once the operation has finished.
 	}
 }
 
 func decodeAPI(w http.ResponseWriter, r *http.Request, value any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONSize)
-	err := json.UnmarshalRead(r.Body, value, durationUnmarshalers, json.RejectUnknownMembers(true))
+	err := json.UnmarshalRead(r.Body, value, json.RejectUnknownMembers(true))
 	if err == nil {
 		return true
 	}
@@ -83,37 +52,29 @@ func decodeAPI(w http.ResponseWriter, r *http.Request, value any) bool {
 	return false
 }
 
-func finishAPI(w http.ResponseWriter, err error) {
-	if err != nil {
-		writeAPI(w, http.StatusConflict, apiError{err.Error()})
-		return
-	}
-	writeAPI(w, http.StatusOK, struct{}{})
-}
-
 func writeAPI(w http.ResponseWriter, code int, value any) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(apiTimeout))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.MarshalEncode(jsontext.NewEncoder(w), value, durationMarshalers)
+	_ = json.MarshalWrite(w, value)
 }
 
 func callAPI(dir, method, path string, body, result any, timeout time.Duration) error {
 	if timeout <= 0 {
 		return errors.New("API timeout must be positive")
 	}
-	if body == nil {
-		body = struct{}{}
-	}
-	data, err := json.Marshal(body, durationMarshalers)
-	if err != nil {
-		return err
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(data)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		// Retry only connection establishment: never replay a mutation after sending it.
-		// This also handles the first add racing daemon startup in the entrypoint.
 		dialer := net.Dialer{Timeout: 200 * time.Millisecond}
 		for {
 			conn, err := dialer.DialContext(ctx, "unix", filepath.Join(dir, "control.sock"))
@@ -127,10 +88,6 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 	}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport}
-	var reader io.Reader
-	if method != http.MethodGet {
-		reader = bytes.NewReader(data)
-	}
 	req, err := http.NewRequestWithContext(ctx, method, "http://docktinel"+path, reader)
 	if err != nil {
 		return err
@@ -141,7 +98,7 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 		return err
 	}
 	defer response.Body.Close()
-	data, err = readJSONBytes(response.Body)
+	data, err := readJSONBytes(response.Body)
 	if err != nil {
 		return err
 	}
@@ -155,7 +112,7 @@ func callAPI(dir, method, path string, body, result any, timeout time.Duration) 
 	if result == nil {
 		result = &struct{}{}
 	}
-	return json.Unmarshal(data, result, durationUnmarshalers)
+	return json.Unmarshal(data, result)
 }
 
 func daemonStatus(dir string, timeout time.Duration) (Status, error) {

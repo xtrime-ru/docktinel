@@ -7,18 +7,6 @@ import (
 	"io"
 )
 
-const addHelp = `Usage:  docktinel add COMMAND
-
-Register a task before startup.
-
-Commands:
-  check     Check a dependency or application
-  job       Run a one-shot or periodic command
-  process   Supervise a foreground helper process
-
-Run 'docktinel add COMMAND --help' for more information on a command.
-`
-
 type usageError struct {
 	err           error
 	command, args string
@@ -53,16 +41,16 @@ func cliCommandHelp(name string, out io.Writer) cliUsage {
 	switch name {
 	case "daemon":
 		description = "Run the sentinel daemon in the foreground."
-	case "startup", "exec":
-		args = "[OPTIONS] [-- COMMAND [ARG...]]"
-		description = "Connect or auto-start with config, run checks, optionally exec an application."
+	case "exec":
+		args = "[OPTIONS] -- COMMAND [ARG...]"
+		description = "Run the foreground daemon with an additional application process."
 	case "restart":
 		args = "--reason TEXT"
 		description = "Request an orderly container restart."
 	case "status":
 		description = "Query the live daemon state."
 	case "healthcheck":
-		description = "Report health and stop the application if the watchdog is stuck."
+		description = "Report health and stop the daemon if the watchdog is stuck."
 	case "version":
 		description = "Show build version."
 	}

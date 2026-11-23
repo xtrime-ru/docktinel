@@ -16,20 +16,18 @@ const Help = `Docktinel — a lightweight sentinel for Docker containers.
 
 Usage: docktinel [--runtime-dir DIR] COMMAND
 
+  add          Add or update a check, job, or process in the config file
   config       Validate configuration without starting a daemon
-  daemon       Run the daemon in the foreground (start with & in entrypoint)
-  add          Register a check, job, or process before startup
-  startup      Connect or auto-start with config, run checks, optionally exec application
-  exec         Alias for startup
+  daemon       Run configured tasks as the main process under Docker init
+  exec         Run the daemon with an application command
   restart      Request an orderly container restart with --reason TEXT
   status       Query the daemon state (--json for machine-readable output)
-  healthcheck  Report health; stop the application if the watchdog is stuck
+  healthcheck  Report health and stop the daemon if the watchdog is stuck
   version      Show build version
 
 Use COMMAND --help or help COMMAND for command options. Runtime directory defaults to
-DOCKTINEL_RUNTIME_DIR or /run/docktinel. Only startup/exec auto-start a daemon,
-and require a config for that. Without a config, start daemon explicitly and
-register tasks with add. Requires Linux and Docker --init.
+DOCKTINEL_RUNTIME_DIR or /run/docktinel. Daemon startup requires Linux and Docker
+init (Compose init: true or docker run --init).
 `
 
 func CLI(args []string, out, stderr io.Writer, version string) int {
@@ -63,7 +61,7 @@ func CLI(args []string, out, stderr io.Writer, version string) int {
 		fmt.Fprint(out, Help)
 		return 0
 	}
-	err := command(args[0], args[1:], *dir, out, stderr, version)
+	err := command(args[0], args[1:], *dir, out, version)
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
 	}
@@ -74,10 +72,12 @@ func CLI(args []string, out, stderr io.Writer, version string) int {
 	return 0
 }
 
-func command(name string, args []string, dir string, out, stderr io.Writer, version string) error {
+func command(name string, args []string, dir string, out io.Writer, version string) error {
 	u := cliCommandHelp(name, out)
 	f := u.flags
 	switch name {
+	case "add":
+		return addCLI(args, out)
 	case "config":
 		return configCLI(args, out)
 	case "version":
@@ -86,21 +86,31 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		}
 		fmt.Fprintln(out, version)
 		return nil
-	case "daemon":
+	case "daemon", "exec":
 		heartbeat := f.Duration("heartbeat", 5*time.Second, "state publication interval")
 		config := f.String("config", "", "config file (DOCKTINEL_CONFIG or /etc/docktinel/config.json)")
-		mainPID := f.Int("main-pid", 0, "entrypoint PID (internal auto-start option)")
-		grace := f.Duration("stop-grace", 10*time.Second, "shutdown hook budget and application termination grace")
-		if err := u.parse(args, false); err != nil {
+		grace := f.Duration("stop-grace", 10*time.Second, "shared budget for shutdown jobs")
+		timeout := f.Duration("timeout", defaultStartupTimeout, "shared startup and after-start budget (DOCKTINEL_STARTUP_TIMEOUT)")
+		if err := u.parse(args, name == "exec"); err != nil {
 			return err
 		}
-		path, required := configPath(*config)
-		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, RegistrationTimeout: time.Minute,
-			StopGrace: *grace, ConfigPath: path, ConfigRequired: required, MainPID: *mainPID})
-	case "add":
-		return addCLI(args, dir, out)
-	case "startup", "exec":
-		return startupCLI(u, args, dir)
+		if name == "exec" && f.NArg() == 0 {
+			return u.invalid(errors.New("a command is required after --"))
+		}
+		explicitTimeout := false
+		f.Visit(func(option *flag.Flag) { explicitTimeout = explicitTimeout || option.Name == "timeout" })
+		if !explicitTimeout {
+			if value, ok := os.LookupEnv("DOCKTINEL_STARTUP_TIMEOUT"); ok {
+				var err error
+				*timeout, err = time.ParseDuration(value)
+				if err != nil || *timeout <= 0 {
+					return u.invalid(errors.New("DOCKTINEL_STARTUP_TIMEOUT must be a positive duration"))
+				}
+			}
+		}
+		path := configPath(*config)
+		return RunDaemon(Config{Dir: dir, Heartbeat: *heartbeat, StartupTimeout: *timeout,
+			StopGrace: *grace, ConfigPath: path, Command: f.Args()})
 	case "restart":
 		reason := f.String("reason", "", "required explanation for the planned restart")
 		if err := u.parse(args, false); err != nil {
@@ -134,9 +144,9 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 		return nil
 	case "healthcheck":
 		maxAge := f.Duration("max-age", 30*time.Second, "maximum heartbeat age")
-		grace := f.Duration("stop-grace", 10*time.Second, "time from emergency TERM to KILL across invocations")
+		grace := f.Duration("stop-grace", 10*time.Second, "time from watchdog stop signal to KILL across invocations")
 		missing := f.Duration("startup-grace", 2*time.Minute, "allow missing status during initial container startup")
-		noKill := f.Bool("no-kill", false, "diagnose without signalling the application")
+		noKill := f.Bool("no-kill", false, "diagnose without signalling the daemon")
 		if err := u.parse(args, false); err != nil {
 			return err
 		}
@@ -151,67 +161,4 @@ func command(name string, args []string, dir string, out, stderr io.Writer, vers
 	default:
 		return &usageError{fmt.Errorf("unknown command %q", name), "docktinel", "[--runtime-dir DIR] COMMAND"}
 	}
-}
-
-func addCLI(args []string, dir string, out io.Writer) error {
-	if len(args) == 0 || (len(args) == 1 && (args[0] == "--help" || args[0] == "-h")) {
-		fmt.Fprint(out, addHelp)
-		return flag.ErrHelp
-	}
-	kind := args[0]
-	if kind != "check" && kind != "job" && kind != "process" {
-		return &usageError{fmt.Errorf("unknown task kind %q", kind), "docktinel add", "COMMAND"}
-	}
-	name := ""
-	rest := args[1:]
-	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
-		name, rest = rest[0], rest[1:]
-	}
-	t := taskDefaults(kind, name)
-	u := newCLIUsage("docktinel add "+kind, "NAME [OPTIONS] -- COMMAND [ARG...]", "Register a "+kind+" task before startup.", out)
-	f := u.flags
-	f.StringVar(&t.Phase, "phase", t.Phase, "startup, after-start, runtime, shutdown, or both")
-	f.DurationVar(&t.Interval, "interval", t.Interval, "check interval or delay after job completion; zero is one-shot")
-	f.DurationVar(&t.Timeout, "timeout", t.Timeout, "execution timeout; zero is allowed only for processes")
-	f.DurationVar(&t.Deadline, "deadline", t.Deadline, "overall retry budget for startup and after-start tasks")
-	f.DurationVar(&t.Grace, "grace", t.Grace, "delay before first background execution")
-	f.IntVar(&t.Failures, "failures", t.Failures, "consecutive failures before restarting the container")
-	f.IntVar(&t.Successes, "successes", t.Successes, "consecutive successful checks required for readiness or recovery")
-	f.StringVar(&t.Failure, "failure", t.Failure, "degrade or restart-container")
-	f.StringVar(&t.OnExit, "on-exit", t.OnExit, "process action: restart or restart-container")
-	f.StringVar(&t.Lock, "lock", t.Lock, "serialize commands sharing this lock name (not checks)")
-	// Keep accepting legacy options, but do not advertise options this kind ignores.
-	hidden := []string{"on-exit"}
-	if kind == "job" {
-		hidden = append(hidden, "successes")
-	}
-	if kind == "process" {
-		hidden = []string{"interval", "deadline", "failures", "successes", "failure"}
-		f.Lookup("phase").Usage = "startup, after-start, or runtime"
-	}
-	if kind == "check" {
-		hidden = append(hidden, "lock")
-		f.Lookup("phase").Usage = "startup, after-start, runtime, or both"
-		f.Lookup("interval").Usage = "delay between checks; at least 100ms"
-	}
-	for _, name := range hidden {
-		f.Lookup(name).Usage = ""
-	}
-	if err := u.parse(rest, true); err != nil {
-		return err
-	}
-	t.Command = f.Args()
-	if t.Name == "" {
-		return u.invalid(errors.New("task NAME is required"))
-	}
-	if err := t.Validate(); err != nil {
-		return u.invalid(err)
-	}
-	t.Env = os.Environ()
-	var err error
-	t.Dir, err = os.Getwd()
-	if err != nil {
-		return err
-	}
-	return callAPI(dir, "POST", "/v1/tasks", &t, nil, apiTimeout)
 }

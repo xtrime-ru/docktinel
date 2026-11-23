@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 type eventBuffer struct {
@@ -101,20 +100,9 @@ func TestFailureCompletionDoesNotLogFalseHealth(t *testing.T) {
 func TestLifecyclePhaseEvents(t *testing.T) {
 	logs := captureEvents(t)
 	d := testDaemon(t)
-	if err := d.startup(time.Second); err != nil {
+	if err := d.startup(); err != nil {
 		t.Fatal(err)
 	}
-	self, err := processIdentity(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.mu.Lock()
-	d.status.Main = self
-	d.mu.Unlock()
-	if err := d.attach(&self); err != nil {
-		t.Fatal(err)
-	}
-	d.workers.Wait()
 	d.stop("event test", false)
 	<-d.done
 	var phases []string
@@ -123,7 +111,7 @@ func TestLifecyclePhaseEvents(t *testing.T) {
 			phases = append(phases, e["phase"].(string))
 		}
 	}
-	if got := strings.Join(phases, ","); got != "startup,awaiting-main,after-start,runtime,stopping" {
+	if got := strings.Join(phases, ","); got != "startup,after-start,runtime,stopping" {
 		t.Fatal("unexpected phase events", got)
 	}
 }

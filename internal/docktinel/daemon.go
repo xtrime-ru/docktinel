@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -17,13 +16,12 @@ import (
 )
 
 type Config struct {
-	Dir                 string
-	Heartbeat           time.Duration
-	RegistrationTimeout time.Duration
-	ConfigPath          string
-	ConfigRequired      bool
-	MainPID             int
-	StopGrace           time.Duration
+	Dir            string
+	Heartbeat      time.Duration
+	StartupTimeout time.Duration
+	ConfigPath     string
+	Command        []string
+	StopGrace      time.Duration
 }
 
 type Daemon struct {
@@ -37,15 +35,11 @@ type Daemon struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	workers   sync.WaitGroup
-	stopOnce  sync.Once
 	done      chan struct{}
+	stopError error
 }
 
 func newDaemon(cfg Config) (*Daemon, error) {
-	now, err := uptime()
-	if err != nil {
-		return nil, err
-	}
 	container, err := containerIdentity()
 	if err != nil {
 		return nil, err
@@ -54,27 +48,19 @@ func newDaemon(cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	mainPID := cfg.MainPID
-	if mainPID == 0 {
-		mainPID = os.Getppid()
-	}
-	main, err := processIdentity(mainPID)
-	if err != nil {
-		return nil, err
-	}
-	if main.PID <= 1 {
-		return nil, errors.New("start daemon from an entrypoint under Docker init: true / --init")
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{cfg: cfg, states: map[string]TaskStatus{}, locks: map[string]chan struct{}{}, ctx: ctx, cancel: cancel, done: make(chan struct{}), status: Status{
-		Version: 1, Instance: uuid.New().String(), Container: container, Daemon: self, Main: main,
-		Phase: "configuring", State: "starting", StartupDeadline: now + cfg.RegistrationTimeout.Seconds(),
+		Version: 1, Instance: uuid.New().String(), Container: container, Daemon: self, Main: self,
+		Phase: "configuring", State: "starting",
 	}}, nil
 }
 
 func RunDaemon(cfg Config) error {
-	if cfg.Heartbeat < 100*time.Millisecond || cfg.RegistrationTimeout <= 0 || cfg.StopGrace <= 0 {
-		return errors.New("heartbeat must be at least 100ms; registration-timeout and stop-grace must be positive")
+	if os.Getppid() != 1 || !hasDockerInit() {
+		return errors.New("Docker init must launch Docktinel directly. Use init: true in Compose or docker run --init. In shell entrypoints, use exec docktinel")
+	}
+	if cfg.Heartbeat < 100*time.Millisecond || cfg.StartupTimeout <= 0 || cfg.StopGrace <= 0 {
+		return errors.New("heartbeat must be at least 100ms; timeout and stop-grace must be positive")
 	}
 	if err := os.MkdirAll(cfg.Dir, 0700); err != nil {
 		return err
@@ -93,17 +79,28 @@ func RunDaemon(cfg Config) error {
 		return err
 	}
 	defer d.cancel()
-	if cfg.ConfigPath != "" {
-		tasks, err := loadConfig(cfg.ConfigPath, cfg.ConfigRequired)
-		if err != nil {
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, watchdogStopSignal)
+	defer signal.Stop(signals)
+	tasks, err := loadConfig(cfg.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if len(cfg.Command) > 0 {
+		app := taskDefaults("process", "application")
+		app.Phase, app.OnExit, app.Command = "startup", "restart-container", cfg.Command
+		tasks = append(tasks, app)
+	}
+	for _, task := range tasks {
+		if err := d.add(&task); err != nil {
 			return err
 		}
-		for _, task := range tasks {
-			if err := d.add(&task); err != nil {
-				return err
-			}
-		}
 	}
+	now, err := uptime()
+	if err != nil {
+		return err
+	}
+	d.status.StartupDeadline = now + cfg.StartupTimeout.Seconds()
 	socket := filepath.Join(cfg.Dir, "control.sock")
 	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
 		return err
@@ -120,7 +117,7 @@ func RunDaemon(cfg Config) error {
 	if err := d.publish(); err != nil {
 		return err
 	}
-	if err := writeJSON(filepath.Join(cfg.Dir, "identity.json"), stopRecord{Container: d.status.Container, Target: d.status.Main}); err != nil {
+	if err := writeJSON(filepath.Join(cfg.Dir, "identity.json"), stopRecord{Container: d.status.Container, Target: d.status.Daemon}); err != nil {
 		return err
 	}
 	slog.Info("Docktinel listening", "socket", socket)
@@ -129,9 +126,7 @@ func RunDaemon(cfg Config) error {
 	defer server.Close()
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.Serve(listener) }()
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(signals)
+	go d.startup()
 	ticker := time.NewTicker(cfg.Heartbeat)
 	defer ticker.Stop()
 	for {
@@ -140,10 +135,14 @@ func RunDaemon(cfg Config) error {
 			d.stop("control API stopped", true)
 			<-d.done
 			return fmt.Errorf("serve control API: %w", err)
-		case <-signals:
-			d.stop("termination signal", false)
+		case sig := <-signals:
+			if sig == watchdogStopSignal {
+				d.stop("healthcheck requested shutdown", true)
+			} else {
+				d.stop("termination signal", false)
+			}
 		case <-d.done:
-			return nil
+			return d.stopError
 		case <-ticker.C:
 			if err := d.heartbeat(); err != nil {
 				slog.Error("cannot publish state", "error", err)
@@ -221,148 +220,86 @@ func (d *Daemon) add(task *Task) error {
 	return nil
 }
 
-func (d *Daemon) startup(budget time.Duration) error {
-	if budget <= 0 {
-		return errors.New("startup timeout must be positive")
-	}
-
+func (d *Daemon) startup() (err error) {
 	d.mu.Lock()
 	if d.status.Phase != "configuring" {
 		d.mu.Unlock()
-		return errors.New("startup has already been requested")
+		return errors.New("startup interrupted")
 	}
-	now, _ := uptime()
-	if d.status.StartupDeadline > 0 && now > d.status.StartupDeadline {
-		d.mu.Unlock()
-		d.stop("registration deadline exceeded", true)
-		return errors.New("registration deadline exceeded")
-	}
-	before := d.lifecycleLocked()
-	d.status.StartupDeadline = now + budget.Seconds()
-	d.status.Phase = "startup"
 	d.workers.Add(1)
-	tasks := slices.Clone(d.tasks)
-	after := d.lifecycleLocked()
+	tasks := d.tasks
 	d.mu.Unlock()
-	logLifecycle(before, after, "startup requested")
-	defer d.workers.Done()
-	if err := d.runPhase("startup", tasks); err != nil {
-		d.stop(err.Error(), true)
-		return err
-	}
-	d.mu.Lock()
-	before = d.lifecycleLocked()
-	if d.status.Phase == "startup" {
-		d.status.Phase = "awaiting-main"
-	}
-	after = d.lifecycleLocked()
-	d.mu.Unlock()
-	logLifecycle(before, after, "startup checks completed")
-	return d.publish()
-}
-
-func (d *Daemon) attach(main *Identity) error {
-	if main == nil || !sameProcess(*main) {
-		return errors.New("main process identity is invalid; PID 1 cannot be the application")
-	}
-	d.mu.Lock()
-	if d.status.Phase != "awaiting-main" {
-		d.mu.Unlock()
-		return errors.New("run startup before exec")
-	}
-	if *main != d.status.Main {
-		d.mu.Unlock()
-		return errors.New("exec must replace the entrypoint: use exec docktinel exec -- COMMAND")
-	}
-	now, _ := uptime()
-	if now > d.status.StartupDeadline {
-		d.mu.Unlock()
-		d.stop("startup deadline exceeded", true)
-		return errors.New("startup deadline exceeded")
-	}
-	before := d.lifecycleLocked()
-	d.status.Main = *main
-	d.status.Phase = "after-start"
-	d.workers.Add(1)
-	tasks := slices.Clone(d.tasks)
-	after := d.lifecycleLocked()
-	d.mu.Unlock()
-	logLifecycle(before, after, "main process attached")
-	if err := d.publish(); err != nil {
-		d.workers.Done()
-		return err
-	}
-	go func() {
-		defer d.workers.Done()
-		if err := d.runPhase("after-start", tasks); err != nil {
+	defer func() {
+		if err != nil {
 			d.stop(err.Error(), true)
-			return
 		}
+		d.workers.Done()
+	}()
+
+	for _, phase := range []string{"startup", "after-start", "runtime"} {
 		d.mu.Lock()
 		if d.status.Phase == "stopping" {
 			d.mu.Unlock()
-			return
+			return nil
 		}
 		before := d.lifecycleLocked()
-		d.status.Phase = "runtime"
-		for _, task := range tasks {
-			if task.Phase == "runtime" || task.Phase == "both" {
-				d.launchLocked(task)
+		d.status.Phase = phase
+		if phase == "runtime" {
+			for _, task := range tasks {
+				if task.Phase == "runtime" || task.Phase == "both" {
+					d.launchLocked(task)
+				}
 			}
 		}
 		after := d.lifecycleLocked()
 		d.mu.Unlock()
-		logLifecycle(before, after, "readiness checks completed")
+		logLifecycle(before, after, "starting "+phase)
 		if err := d.publish(); err != nil {
-			d.stop("cannot publish runtime state", true)
+			return err
 		}
-
-	}()
+		if phase == "runtime" {
+			return nil
+		}
+		if err := d.runPhase(phase, tasks); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func (d *Daemon) stop(reason string, terminateMain bool) {
-	d.stopOnce.Do(func() {
-		now, _ := uptime()
-		d.mu.Lock()
-		before := d.lifecycleLocked()
-		d.status.Phase = "stopping"
-		d.status.State = "unhealthy"
-		d.status.Reason = reason
-		d.status.StopDeadline = now + 2*d.cfg.StopGrace.Seconds() + 5
-		main := d.status.Main
-		tasks := slices.Clone(d.tasks)
-		after := d.lifecycleLocked()
+func (d *Daemon) stop(reason string, restart bool) {
+	now, _ := uptime()
+	d.mu.Lock()
+	if d.status.Phase == "stopping" {
 		d.mu.Unlock()
-		logLifecycle(before, after, reason)
-		d.cancel()
-		if err := d.publish(); err != nil {
-			slog.Error("cannot publish stopping state", "error", err)
+		return
+	}
+	before := d.lifecycleLocked()
+	d.status.Phase, d.status.State, d.status.Reason = "stopping", "unhealthy", reason
+	d.status.StopDeadline = now + (d.cfg.StopGrace + 2*commandStopGrace + time.Second).Seconds()
+	after := d.lifecycleLocked()
+	d.mu.Unlock()
+
+	d.cancel()
+	logLifecycle(before, after, reason)
+	if err := d.publish(); err != nil {
+		slog.Error("cannot publish stopping state", "error", err)
+	}
+	go func() {
+		// Allow the external healthcheck to escalate if a worker cannot exit.
+		d.workers.Wait()
+		cleanup, cancel := context.WithTimeout(context.Background(), d.cfg.StopGrace)
+		defer close(d.done)
+		defer cancel()
+		for _, task := range d.tasks {
+			if task.Phase == "shutdown" {
+				if err := d.attempt(cleanup, task); err != nil {
+					slog.Warn("cleanup failed", "task", task.Name, "error", err)
+				}
+			}
 		}
-		go func() {
-			// Child cancellation normally completes in two seconds. Keep the
-			// daemon alive if a child is stuck; external healthcheck can escalate.
-			d.workers.Wait()
-			cleanup, cancel := context.WithTimeout(context.Background(), d.cfg.StopGrace)
-			for _, task := range tasks {
-				if task.Phase == "shutdown" {
-					if err := d.attempt(cleanup, task); err != nil {
-						slog.Warn("cleanup failed", "task", task.Name, "error", err)
-					}
-				}
-			}
-			cancel()
-			if terminateMain && sameProcess(main) {
-				_ = signalProcess(main, syscall.SIGTERM)
-				deadline := time.Now().Add(d.cfg.StopGrace)
-				for sameProcess(main) && time.Now().Before(deadline) {
-					time.Sleep(100 * time.Millisecond)
-				}
-				if sameProcess(main) {
-					_ = signalProcess(main, syscall.SIGKILL)
-				}
-			}
-			close(d.done)
-		}()
-	})
+		if restart {
+			d.stopError = errors.New(reason)
+		}
+	}()
 }

@@ -1,8 +1,6 @@
 package docktinel
 
 import (
-	"context"
-	"errors"
 	"os"
 	"syscall"
 )
@@ -19,19 +17,4 @@ func tryFileLock(path string) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
-}
-
-func waitFileLock(ctx context.Context, path string) (*os.File, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		file, err := tryFileLock(path)
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return file, err
-		}
-		if !delay(ctx, retryInterval) {
-			return nil, ctx.Err()
-		}
-	}
 }

@@ -1,10 +1,7 @@
 package docktinel
 
 import (
-	"bytes"
 	"context"
-	"encoding/json/v2"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,13 +20,8 @@ func TestStartupAndAfterStartRequireConsecutiveSuccesses(t *testing.T) {
 			if err := d.add(&task); err != nil {
 				t.Fatal(err)
 			}
-			if err := d.startup(3 * time.Second); err != nil {
+			if err := d.startup(); err != nil {
 				t.Fatal(err)
-			}
-			if phase == "after-start" {
-				if err := d.runPhase(phase, d.tasks); err != nil {
-					t.Fatal(err)
-				}
 			}
 			data, err := os.ReadFile(counter)
 			if err != nil || strings.TrimSpace(string(data)) != "5" {
@@ -104,7 +96,7 @@ func TestSuccessThresholdRespectsTaskDeadline(t *testing.T) {
 			if err := d.add(&task); err != nil {
 				t.Fatal(err)
 			}
-			err := d.startup(2 * time.Second)
+			err := d.startup()
 			if (err != nil) != (policy == "restart-container") {
 				t.Fatal("deadline did not follow configured failure policy", err)
 			}
@@ -141,27 +133,9 @@ func TestSuccessThresholdConfigAndValidation(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
-		tasks, err := loadConfig(path, true)
+		tasks, err := loadConfig(path)
 		if err != nil || tasks[0].Successes != tc.want {
 			t.Fatalf("config successes: %+v, %v", tasks, err)
 		}
-	}
-}
-
-func TestLegacyAPIRegistrationDefaultsSuccesses(t *testing.T) {
-	d := &Daemon{status: Status{Phase: "configuring"}, states: map[string]TaskStatus{}, locks: map[string]chan struct{}{}}
-	task := testTask("dns", "check", "true")
-	data, err := json.Marshal(task, durationMarshalers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy := bytes.Replace(data, []byte(`"successes":1,`), nil, 1)
-	if bytes.Equal(data, legacy) {
-		t.Fatal("legacy fixture still contains successes")
-	}
-	w := httptest.NewRecorder()
-	d.controlServer().Handler.ServeHTTP(w, httptest.NewRequest("POST", "/v1/tasks", bytes.NewReader(legacy)))
-	if w.Code != 200 || len(d.tasks) != 1 || d.tasks[0].Successes != 1 {
-		t.Fatalf("legacy registration: code=%d body=%s tasks=%+v", w.Code, w.Body, d.tasks)
 	}
 }

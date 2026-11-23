@@ -22,12 +22,15 @@ func testDaemon(t *testing.T) *Daemon {
 	if _, err := uptime(); err != nil {
 		t.Skip("Linux integration test")
 	}
-	d, err := newDaemon(Config{Dir: t.TempDir(), Heartbeat: time.Second, RegistrationTimeout: time.Minute, StopGrace: 100 * time.Millisecond})
+	d, err := newDaemon(Config{Dir: t.TempDir(), Heartbeat: time.Second, StartupTimeout: time.Minute, StopGrace: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Never signal the test runner or the host application.
-	d.status.Main = Identity{}
+	now, err := uptime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.status.StartupDeadline = now + d.cfg.StartupTimeout.Seconds()
 	t.Cleanup(func() {
 		d.stop("test cleanup", false)
 		select {
@@ -169,17 +172,17 @@ func TestRegistrationAndStartupRetry(t *testing.T) {
 	if d.add(&task) == nil {
 		t.Fatal("duplicate task accepted")
 	}
-	if err := d.startup(2 * time.Minute); err != nil {
+	if err := d.startup(); err != nil {
 		t.Fatal(err)
 	}
-	if d.snapshot().Phase != "awaiting-main" || d.snapshot().Tasks[0].State != "healthy" {
+	if d.snapshot().Phase != "runtime" || d.snapshot().Tasks[0].State != "healthy" {
 		t.Fatal(d.snapshot())
 	}
 	task.Name = "late"
 	if d.add(&task) == nil {
 		t.Fatal("late registration accepted")
 	}
-	if d.startup(2*time.Minute) == nil {
+	if d.startup() == nil {
 		t.Fatal("duplicate startup accepted")
 	}
 }
@@ -192,7 +195,7 @@ func TestStartupDependencyCanDegrade(t *testing.T) {
 	if err := d.add(&task); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.startup(2 * time.Minute); err != nil {
+	if err := d.startup(); err != nil {
 		t.Fatal(err)
 	}
 	if d.snapshot().Tasks[0].State != "degraded" {
@@ -328,20 +331,8 @@ func TestAtomicStateConcurrentReaders(t *testing.T) {
 	}
 }
 
-func TestExecRequiresEntrypointIdentity(t *testing.T) {
-	d := testDaemon(t)
-	d.status.Phase = "awaiting-main"
-	self, err := processIdentity(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.attach(&self) == nil {
-		t.Fatal("unrelated process can replace main identity")
-	}
-}
-
 func TestCommandHelpAndErrors(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"daemon", "--help"}, {"add", "--help"}, {"version"}} {
+	for _, args := range [][]string{{"--help"}, {"daemon", "--help"}, {"version"}} {
 		var out, err bytes.Buffer
 		if code := CLI(args, &out, &err, "test"); code != 0 {
 			t.Fatalf("%v: %s", args, err.String())
@@ -456,15 +447,7 @@ func TestRuntimeTransitionPublishesWithoutHeartbeat(t *testing.T) {
 	if err := d.add(&task); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.startup(time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	self, err := processIdentity(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.status.Main = self
-	if err := d.attach(&self); err != nil {
+	if err := d.startup(); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Second)
