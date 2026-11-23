@@ -93,6 +93,38 @@ func TestHealthEvaluation(t *testing.T) {
 	}
 }
 
+func TestHealthcheckReadsSnapshotBeforeUptime(t *testing.T) {
+	if _, err := uptime(); err != nil {
+		t.Skip("Linux integration test")
+	}
+	container, err := containerIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, err := processIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "status.json")
+	status := Status{
+		Version: 1, Instance: "run", Container: container, Daemon: daemon,
+		Heartbeat: 99, Phase: "runtime", State: "healthy",
+	}
+	if err := writeJSON(path, status); err != nil {
+		t.Fatal(err)
+	}
+
+	// Publish a new heartbeat immediately after the check samples the clock.
+	readUptime := func() (float64, error) {
+		status.Heartbeat = 100.03
+		return 100, writeJSON(path, status)
+	}
+	if err := healthcheck(dir, 30*time.Second, 10*time.Second, 0, true, readUptime); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRegistrationAndStartupRetry(t *testing.T) {
 	d := testDaemon(t)
 	marker := filepath.Join(t.TempDir(), "ready")

@@ -81,22 +81,27 @@ func emergencyStop(dir string, container string, target Identity, now float64, g
 }
 
 func Healthcheck(dir string, maxAge, stopGrace, missingGrace time.Duration, noKill bool) error {
-	now, err := uptime()
-	if err != nil {
-		return err
-	}
+	return healthcheck(dir, maxAge, stopGrace, missingGrace, noKill, uptime)
+}
+
+func healthcheck(dir string, maxAge, stopGrace, missingGrace time.Duration, noKill bool, readUptime func() (float64, error)) error {
 	container, err := containerIdentity()
 	if err != nil {
 		return err
 	}
-	s, err := readStatus(dir)
+	// The daemon can publish a new heartbeat while the snapshot is being read.
+	s, statusErr := readStatus(dir)
+	now, err := readUptime()
 	if err != nil {
+		return err
+	}
+	if statusErr != nil {
 		identity, _ := readJSON[stopRecord](filepath.Join(dir, "identity.json"))
 		if identity.Container == container && sameProcess(identity.Target) {
 			if !noKill {
 				_ = emergencyStop(dir, container, identity.Target, now, stopGrace)
 			}
-			return fmt.Errorf("watchdog state is missing or invalid: %w", err)
+			return fmt.Errorf("watchdog state is missing or invalid: %w", statusErr)
 		}
 		// PID 1's direct child is the configured entrypoint/application under
 		// tini. A live, local identity is needed even if status.json is lost.
@@ -108,7 +113,7 @@ func Healthcheck(dir string, maxAge, stopGrace, missingGrace time.Duration, noKi
 				_ = emergencyStop(dir, container, target, now, stopGrace)
 			}
 		}
-		return fmt.Errorf("cannot read watchdog state: %w", err)
+		return fmt.Errorf("cannot read watchdog state: %w", statusErr)
 	}
 	if s.Container != container {
 		if age, ageErr := containerAge(now); ageErr == nil && age < missingGrace.Seconds() {
