@@ -18,23 +18,14 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  metadata:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.image.outputs.name }}
       tags: ${{ steps.meta.outputs.tags }}
-      digest: ${{ steps.build.outputs.digest }}
+      labels: ${{ steps.meta.outputs.labels }}
       stable: ${{ steps.release.outputs.stable }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.x'
-          check-latest: true
-          cache: false
-      - name: Check formatting
-        run: test -z "$(gofmt -l cmd internal integration examples/basic)"
-      - uses: docker/setup-buildx-action@v4
       - name: Image name
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
@@ -63,50 +54,21 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ steps.release.outputs.aliases == 'true' }}
             type=semver,pattern={{major}},value=${{ github.event.release.tag_name }},enable=${{ steps.release.outputs.aliases == 'true' }}
           flavor: latest=false
-      - name: Build image and extract binaries once
-        uses: docker/build-push-action@v7
-        id: build
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          outputs: |
-            type=oci,dest=${{ runner.temp }}/docktinel-image.tar
-            type=local,dest=${{ runner.temp }}/image-root
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ github.event.release.tag_name || github.ref_name }}
-          # Re-run tests on every CI build; reuse their compiled test binaries.
-          no-cache-filters: test
-          cache-from: type=gha,scope=docktinel
-          cache-to: type=gha,scope=docktinel,mode=max
-          provenance: mode=max
-          sbom: true
-      - name: Collect binaries from the image filesystem
-        env:
-          IMAGE_ROOT: ${{ runner.temp }}/image-root
-        run: |
-          mkdir -p dist
-          for arch in amd64 arm64; do
-            cp "$IMAGE_ROOT/linux_$arch/usr/local/bin/docktinel" "dist/docktinel-linux-$arch"
-          done
-          cd dist
-          sha256sum docktinel-linux-* > SHA256SUMS
-      - uses: actions/upload-artifact@v7
-        with:
-          name: linux-binaries
-          path: dist/
-      - uses: actions/upload-artifact@v7
-        with:
-          name: container-image
-          path: ${{ runner.temp }}/docktinel-image.tar
-          compression-level: 0
 
-  integration:
-    needs: build
+  build:
+    name: Build and test / ${{ matrix.arch }}
+    needs: metadata
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      BUILD_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -118,16 +80,31 @@ jobs:
             integration/go.mod
             integration/go.sum
             integration/**/*.go
-      - uses: actions/download-artifact@v8
+      - name: Check formatting
+        if: matrix.arch == 'amd64'
+        run: test -z "$(gofmt -l cmd internal integration examples/basic)"
+      - uses: docker/setup-buildx-action@v4
+        id: buildx
+      - name: Build and unit-test the native image
+        uses: docker/build-push-action@v7
         with:
-          name: container-image
-          path: ${{ runner.temp }}
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          outputs: |
+            type=oci,dest=${{ runner.temp }}/docktinel-${{ matrix.arch }}.tar
+            type=local,dest=${{ runner.temp }}/image-root,platform-split=false
+          labels: ${{ needs.metadata.outputs.labels }}
+          build-args: VERSION=${{ github.event.release.tag_name || github.ref_name }}
+          # Re-run tests on every CI build; reuse their compiled test binaries.
+          no-cache-filters: test
+          cache-from: type=gha,scope=docktinel-${{ matrix.arch }}
+          cache-to: type=gha,scope=docktinel-${{ matrix.arch }},mode=max
+          provenance: mode=max
+          sbom: true
       - name: Unpack the image for Buildx
         run: |
           mkdir -p "$RUNNER_TEMP/docktinel-image"
-          tar -xf "$RUNNER_TEMP/docktinel-image.tar" -C "$RUNNER_TEMP/docktinel-image"
-      - uses: docker/setup-buildx-action@v4
-        id: buildx
+          tar -xf "$RUNNER_TEMP/docktinel-$BUILD_ARCH.tar" -C "$RUNNER_TEMP/docktinel-image"
       - name: Expose Buildx cache credentials
         uses: actions/github-script@v9
         with:
@@ -135,7 +112,7 @@ jobs:
             core.setSecret(process.env.ACTIONS_RUNTIME_TOKEN);
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN);
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL);
-      - name: Build test environment from the image artifact
+      - name: Build test environment from the archived image
         run: make demo
         env:
           DOCKTINEL_IMAGE: docktinel-source
@@ -145,47 +122,77 @@ jobs:
             --cache-from type=gha,version=2,scope=docktinel-demo-${{ runner.arch }}
             --cache-to type=gha,version=2,scope=docktinel-demo-${{ runner.arch }},mode=max
       - run: make integration-test
+      - name: Collect the tested binary
+        run: cp "$RUNNER_TEMP/image-root/usr/local/bin/docktinel" "$RUNNER_TEMP/docktinel-linux-$BUILD_ARCH"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-binary-${{ matrix.arch }}
+          path: ${{ runner.temp }}/docktinel-linux-${{ matrix.arch }}
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: container-image-${{ matrix.arch }}
+          path: ${{ runner.temp }}/docktinel-${{ matrix.arch }}.tar
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+
+  package-binaries:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: linux-binary-*
+          merge-multiple: true
+          path: dist
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum docktinel-linux-amd64 docktinel-linux-arm64 > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-binaries
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
 
   publish:
     if: github.event_name == 'push' || github.event_name == 'release'
-    needs: [build, integration]
+    needs: [metadata, build]
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ needs.build.outputs.image }}
+      image: ${{ needs.metadata.outputs.image }}
       digest: ${{ steps.publish.outputs.digest }}
-      stable: ${{ needs.build.outputs.stable }}
+      stable: ${{ needs.metadata.outputs.stable }}
     permissions:
       contents: read
       packages: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
-          name: container-image
-          path: ${{ runner.temp }}
-      - name: Install OCI image copier
+          pattern: container-image-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/images
+      - name: Install regctl
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends skopeo
-      - name: Log in to GHCR
-        env:
-          GHCR_USER: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GHCR_TOKEN" | skopeo login ghcr.io --username "$GHCR_USER" --password-stdin
-      - name: Publish the tested image without rebuilding
+          curl -fsSL --connect-timeout 5 --max-time 30 --retry 2 https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-linux-amd64 -o "$RUNNER_TEMP/regctl"
+          echo "8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd  $RUNNER_TEMP/regctl" | sha256sum --check -
+          chmod +x "$RUNNER_TEMP/regctl"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish a multi-platform index from the tested images
         id: publish
         env:
-          TAGS: ${{ needs.build.outputs.tags }}
-          EXPECTED_DIGEST: ${{ needs.build.outputs.digest }}
-        run: |
-          test -n "$TAGS"
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            skopeo copy --all --preserve-digests --digestfile "$RUNNER_TEMP/published.digest" \
-              "oci-archive:$RUNNER_TEMP/docktinel-image.tar" "docker://$tag"
-          done <<< "$TAGS"
-          digest=$(cat "$RUNNER_TEMP/published.digest")
-          test "$digest" = "$EXPECTED_DIGEST"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          TAGS: ${{ needs.metadata.outputs.tags }}
+        run: bash scripts/ci-publish.sh "$RUNNER_TEMP/images"
 
   promote-latest:
     if: github.event_name == 'release' && needs.publish.outputs.stable == 'true'
