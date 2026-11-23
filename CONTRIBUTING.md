@@ -26,4 +26,4 @@ The SDK honors Docker's host/TLS environment variables and negotiates the Engine
 
 Format Go changes with `gofmt -w cmd internal integration examples/basic`. Keep commits focused on one behavior and update the command reference and examples when changing lifecycle semantics or defaults.
 
-The [CI workflow](.github/workflows/ci.yml) builds and runs race tests, vet, and Docker integration tests in parallel on native Linux amd64 and arm64 runners. Linux binaries and SHA256 checksums are available as workflow artifacts.
+The [CI workflow](.github/workflows/ci.yml) builds and runs race tests, vet, and Docker integration tests in parallel on native Linux amd64 and arm64 runners. Linux binaries and SHA256 checksums are available as workflow artifacts and are attached to GitHub releases.

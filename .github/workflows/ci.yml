@@ -194,6 +194,43 @@ jobs:
           TAGS: ${{ needs.metadata.outputs.tags }}
         run: bash scripts/ci-publish.sh "$RUNNER_TEMP/images"
 
+  release-binaries:
+    if: github.event_name == 'release'
+    needs: [package-binaries, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-binaries
+          path: dist
+      - name: Attach binaries and checksums to the release
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          sha256sum --check SHA256SUMS
+          assets=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          missing=()
+          for file in docktinel-linux-amd64 docktinel-linux-arm64 SHA256SUMS; do
+            if grep -Fxq -- "$file" <<< "$assets"; then
+              gh release download "$RELEASE_TAG" --pattern "$file" --output "$RUNNER_TEMP/$file"
+              if ! cmp -s "$file" "$RUNNER_TEMP/$file"; then
+                echo "::error::Existing release asset $file differs from the tested artifact"
+                exit 1
+              fi
+            else
+              missing+=("$file")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            gh release upload "$RELEASE_TAG" "${missing[@]}"
+          fi
+
   promote-latest:
     if: github.event_name == 'release' && needs.publish.outputs.stable == 'true'
     needs: publish
