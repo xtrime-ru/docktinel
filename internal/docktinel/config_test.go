@@ -126,7 +126,7 @@ func TestGlobalStartupBudgetBoundsOptionalTask(t *testing.T) {
 	task := testTask("slow", "job", "sleep 5")
 	task.Phase = "startup"
 	task.Timeout, task.Deadline = 10*time.Second, 10*time.Second
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
@@ -143,7 +143,7 @@ func TestAfterStartSharesOriginalBudget(t *testing.T) {
 	d.status.StartupDeadline -= (time.Minute - 100*time.Millisecond).Seconds()
 	task := testTask("ready", "check", "sleep 5")
 	task.Phase = "after-start"
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.startup(); err != context.DeadlineExceeded {

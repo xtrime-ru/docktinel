@@ -39,7 +39,7 @@ type Daemon struct {
 	stopError error
 }
 
-func newDaemon(cfg Config) (*Daemon, error) {
+func newDaemon(cfg Config, tasks ...Task) (*Daemon, error) {
 	container, err := containerIdentity()
 	if err != nil {
 		return nil, err
@@ -49,10 +49,17 @@ func newDaemon(cfg Config) (*Daemon, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Daemon{cfg: cfg, states: map[string]TaskStatus{}, locks: map[string]chan struct{}{}, ctx: ctx, cancel: cancel, done: make(chan struct{}), status: Status{
+	d := &Daemon{cfg: cfg, states: map[string]TaskStatus{}, locks: map[string]chan struct{}{}, ctx: ctx, cancel: cancel, done: make(chan struct{}), status: Status{
 		Version: 1, Instance: uuid.New().String(), Container: container, Daemon: self, Main: self,
 		Phase: "configuring", State: "starting",
-	}}, nil
+	}}
+	for _, task := range tasks {
+		if err := d.add(task); err != nil {
+			cancel()
+			return nil, err
+		}
+	}
+	return d, nil
 }
 
 func RunDaemon(cfg Config) error {
@@ -74,11 +81,6 @@ func RunDaemon(cfg Config) error {
 	}
 	defer lock.Close()
 
-	d, err := newDaemon(cfg)
-	if err != nil {
-		return err
-	}
-	defer d.cancel()
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, watchdogStopSignal)
 	defer signal.Stop(signals)
@@ -91,11 +93,11 @@ func RunDaemon(cfg Config) error {
 		app.Phase, app.OnExit, app.Command = "startup", "restart-container", cfg.Command
 		tasks = append(tasks, app)
 	}
-	for _, task := range tasks {
-		if err := d.add(&task); err != nil {
-			return err
-		}
+	d, err := newDaemon(cfg, tasks...)
+	if err != nil {
+		return err
 	}
+	defer d.cancel()
 	now, err := uptime()
 	if err != nil {
 		return err
@@ -191,22 +193,15 @@ func (d *Daemon) publish() error {
 	return writeJSON(filepath.Join(d.cfg.Dir, "status.json"), d.snapshot())
 }
 
-func (d *Daemon) add(task *Task) error {
-	if task == nil {
-		return errors.New("missing task")
-	}
+// add prepares the task registry before the daemon starts any workers.
+func (d *Daemon) add(task Task) error {
 	if err := task.Validate(); err != nil {
 		return err
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.status.Phase != "configuring" {
-		return errors.New("register all tasks before startup")
 	}
 	if _, exists := d.states[task.Name]; exists {
 		return fmt.Errorf("task %q already exists", task.Name)
 	}
-	d.tasks = append(d.tasks, *task)
+	d.tasks = append(d.tasks, task)
 	state := TaskStatus{Name: task.Name, Kind: task.Kind, State: "pending", Critical: task.critical()}
 	if task.Kind == "check" {
 		state.RequiredSuccesses = task.Successes

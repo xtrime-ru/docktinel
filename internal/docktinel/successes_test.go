@@ -17,7 +17,7 @@ func TestStartupAndAfterStartRequireConsecutiveSuccesses(t *testing.T) {
 			task := testTask("ready", "check", `n=0; if [ -f "$COUNT" ]; then n=$(cat "$COUNT"); fi; n=$((n+1)); echo "$n" > "$COUNT"; test "$n" -ne 2`)
 			task.Phase, task.Successes, task.Deadline = phase, 3, 2*time.Second
 			task.Env = append(task.Env, "COUNT="+counter)
-			if err := d.add(&task); err != nil {
+			if err := d.add(task); err != nil {
 				t.Fatal(err)
 			}
 			if err := d.startup(); err != nil {
@@ -39,7 +39,7 @@ func TestRecoveryRequiresSuccessThresholdAndResetsOnFailure(t *testing.T) {
 	d := testDaemon(t)
 	task := testTask("dns", "check", "true")
 	task.Successes = 3
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	d.status.Phase = "runtime"
@@ -93,7 +93,7 @@ func TestSuccessThresholdRespectsTaskDeadline(t *testing.T) {
 			d := testDaemon(t)
 			task := testTask("ready", "check", "true")
 			task.Phase, task.Successes, task.Deadline, task.Failure = "startup", 3, 150*time.Millisecond, policy
-			if err := d.add(&task); err != nil {
+			if err := d.add(task); err != nil {
 				t.Fatal(err)
 			}
 			err := d.startup()

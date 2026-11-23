@@ -15,7 +15,7 @@ func TestHelperHealthRecoversOnRestart(t *testing.T) {
 			task := testTask("helper", "process", `if [ ! -e "$MARKER" ]; then touch "$MARKER"; exit `+code+`; fi; sleep 60`)
 			task.Timeout = 0
 			task.Env = append(task.Env, "MARKER="+marker)
-			if err := d.add(&task); err != nil {
+			if err := d.add(task); err != nil {
 				t.Fatal(err)
 			}
 			d.mu.Lock()

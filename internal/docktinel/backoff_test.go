@@ -70,7 +70,7 @@ func TestQuickSuccessfulProcessDoesNotSpin(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "starts")
 	task := testTask("quick", "process", `echo started >> "$STARTS"`)
 	task.Env = append(task.Env, "STARTS="+marker)
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	d.launch(task)
@@ -99,7 +99,7 @@ func TestProcessRestartContainerDoesNotWaitForBackoff(t *testing.T) {
 			d := testDaemon(t)
 			task := testTask("critical-process", "process", command)
 			task.OnExit = "restart-container"
-			if err := d.add(&task); err != nil {
+			if err := d.add(task); err != nil {
 				t.Fatal(err)
 			}
 			d.launch(task)

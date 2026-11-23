@@ -33,7 +33,7 @@ func serveTestAPI(t *testing.T, d *Daemon) string {
 func TestUnixHTTPAPI(t *testing.T) {
 	d := testDaemon(t)
 	task := testTask("dns", "check", "true")
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	dir := serveTestAPI(t, d)

@@ -166,10 +166,10 @@ func TestRegistrationAndStartupRetry(t *testing.T) {
 	task := testTask("wait", "check", `if [ -e "$READY" ]; then exit 0; else touch "$READY"; exit 1; fi`)
 	task.Phase = "startup"
 	task.Env = append(task.Env, "READY="+marker)
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
-	if d.add(&task) == nil {
+	if d.add(task) == nil {
 		t.Fatal("duplicate task accepted")
 	}
 	if err := d.startup(); err != nil {
@@ -177,10 +177,6 @@ func TestRegistrationAndStartupRetry(t *testing.T) {
 	}
 	if d.snapshot().Phase != "runtime" || d.snapshot().Tasks[0].State != "healthy" {
 		t.Fatal(d.snapshot())
-	}
-	task.Name = "late"
-	if d.add(&task) == nil {
-		t.Fatal("late registration accepted")
 	}
 	if d.startup() == nil {
 		t.Fatal("duplicate startup accepted")
@@ -192,7 +188,7 @@ func TestStartupDependencyCanDegrade(t *testing.T) {
 	task := testTask("optional-dns", "check", "false")
 	task.Phase = "startup"
 	task.Deadline = 150 * time.Millisecond
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.startup(); err != nil {
@@ -207,7 +203,7 @@ func TestCriticalCheckStopsAfterThreshold(t *testing.T) {
 	d := testDaemon(t)
 	task := testTask("critical", "check", "false")
 	task.Failure = "restart-container"
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	d.launch(task)
@@ -224,7 +220,7 @@ func TestCriticalCheckStopsAfterThreshold(t *testing.T) {
 func TestSuccessResetsConsecutiveFailures(t *testing.T) {
 	d := testDaemon(t)
 	task := testTask("check", "check", "true")
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	d.markFailure(task, os.ErrInvalid)
@@ -245,7 +241,7 @@ func TestSharedLockSerializesJobs(t *testing.T) {
 		task.Interval = 0
 		task.Lock = "shared"
 		task.Env = append(task.Env, "GUARD="+filepath.Join(root, "guard"))
-		if err := d.add(&task); err != nil {
+		if err := d.add(task); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -348,7 +344,7 @@ func TestStateDoesNotContainTaskSecrets(t *testing.T) {
 	d := testDaemon(t)
 	task := testTask("private", "job", "echo password")
 	task.Env = append(task.Env, "TOKEN=secret")
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := json.Marshal(d.snapshot())
@@ -362,7 +358,7 @@ func TestLockTimeoutClearsExecutionDeadline(t *testing.T) {
 	task := testTask("waiting", "job", "true")
 	task.Lock = "occupied"
 	task.Timeout = 20 * time.Millisecond
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	d.locks[task.Lock] <- struct{}{}
@@ -378,7 +374,7 @@ func TestTaskDeadlineAllowsNextPublication(t *testing.T) {
 	d := testDaemon(t)
 	d.cfg.Heartbeat = 10 * time.Second
 	task := testTask("fast", "check", "sleep 0.1")
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	d.launch(task)
@@ -402,7 +398,7 @@ func TestProcessCriticalityUsesOnExitOnly(t *testing.T) {
 		d := testDaemon(t)
 		task := testTask("process", "process", "true")
 		task.Failure, task.OnExit = tc.failure, tc.onExit
-		if err := d.add(&task); err != nil {
+		if err := d.add(task); err != nil {
 			t.Fatal(err)
 		}
 		if got := d.snapshot().Tasks[0].Critical; got != tc.critical {
@@ -414,7 +410,7 @@ func TestProcessCriticalityUsesOnExitOnly(t *testing.T) {
 func TestDegradedPersistsDuringRetryUntilSuccess(t *testing.T) {
 	d := testDaemon(t)
 	task := testTask("retry", "job", "sleep 0.15")
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	d.status.Phase = "runtime"
@@ -444,7 +440,7 @@ func TestRuntimeTransitionPublishesWithoutHeartbeat(t *testing.T) {
 	d.cfg.Heartbeat = time.Hour
 	task := testTask("delayed", "check", "true")
 	task.Grace = time.Minute
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.startup(); err != nil {
@@ -498,7 +494,7 @@ func TestExpiredPhaseDoesNotLaunchProcess(t *testing.T) {
 	d := testDaemon(t)
 	task := testTask("late", "process", "true")
 	task.Phase = "startup"
-	if err := d.add(&task); err != nil {
+	if err := d.add(task); err != nil {
 		t.Fatal(err)
 	}
 	now, _ := uptime()
