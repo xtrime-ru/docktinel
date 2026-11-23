@@ -37,7 +37,7 @@ additional seconds in the Docker stop timeout for process groups to exit after
 cancellation, including a shutdown job that exceeds its deadline. Healthcheck
 escalation has its own grace and runs across invocations.
 
-`--startup-grace` only allows a missing initial snapshot; a valid snapshot carries its own startup deadline. Lost or corrupt state after initialization triggers escalation. If both status and identity files are missing, healthcheck waits out its startup grace, then attempts to identify the unique direct child of PID 1; if ambiguous, it reports an error without guessing a PID.
+`--startup-grace` only allows a missing initial snapshot; a valid snapshot carries its own startup deadline. Lost or corrupt state after initialization triggers escalation. If both status and identity files are missing, healthcheck waits out its startup grace, then attempts to identify the unique direct child of `docker-init` as PID 1; if ambiguous, it reports an error without guessing a PID.
 
 Exit status is zero for successful CLI operations, nonzero for errors. Healthcheck returns nonzero while starting/stopping or on a critical fault; degraded runtime returns zero. `status` queries the live daemon with a five-second deadline; success means the query completed, regardless of the reported health. Healthcheck reads the atomic snapshot independently of the daemon's [local HTTP API](api.md). Task commands have no reserved special exit codes.
 

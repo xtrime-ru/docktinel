@@ -165,6 +165,9 @@ func containerAge(now float64) (float64, error) {
 }
 
 func initChild() (Identity, error) {
+	if !hasDockerInit() {
+		return Identity{}, errors.New("PID 1 is not docker-init")
+	}
 	b, err := os.ReadFile("/proc/1/task/1/children")
 	if err != nil {
 		return Identity{}, err

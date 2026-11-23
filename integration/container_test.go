@@ -535,6 +535,20 @@ func TestDaemonRequiresDockerInit(t *testing.T) {
 	}
 }
 
+func TestHealthcheckLeavesChildOfShellPID1Alone(t *testing.T) {
+	f := newFixtureWithInit(t, false, `
+		sleep 600 &
+		echo "$!" > /tmp/child-pid
+		wait "$!"
+	`)
+	eventually(t, func(ctx context.Context) (int, error) {
+		_, code, err := f.exec(ctx, "test", "-s", "/tmp/child-pid")
+		return code, err
+	}, func(code int) bool { return code == 0 })
+	f.expectUnhealthy("--startup-grace", "0s")
+	f.mustExec("sh", "-ec", "kill -0 $(cat /tmp/child-pid)")
+}
+
 func TestDaemonRejectsBackgroundLaunch(t *testing.T) {
 	f := newFixture(t, `
 		docktinel daemon &
