@@ -125,6 +125,38 @@ func TestHealthcheckReadsSnapshotBeforeUptime(t *testing.T) {
 	}
 }
 
+func TestHealthcheckHonorsShutdownDeadlineAfterDaemonExit(t *testing.T) {
+	if _, err := uptime(); err != nil {
+		t.Skip("Linux integration test")
+	}
+	container, err := containerIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	status := Status{
+		Version: 1, Instance: "run", Container: container, Heartbeat: 99,
+		Phase: "stopping", Reason: "termination signal", StopDeadline: 124,
+	}
+	if err := writeJSON(filepath.Join(dir, "status.json"), status); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		now  float64
+		want string
+	}{
+		{100, "stopping: termination signal"},
+		{124, "stopping: termination signal"},
+		{125, "shutdown deadline exceeded"},
+	} {
+		readUptime := func() (float64, error) { return tc.now, nil }
+		err := healthcheck(dir, time.Second, 10*time.Second, 0, true, readUptime)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("at %v: got %v, want %q", tc.now, err, tc.want)
+		}
+	}
+}
+
 func TestRegistrationAndStartupRetry(t *testing.T) {
 	d := testDaemon(t)
 	marker := filepath.Join(t.TempDir(), "ready")

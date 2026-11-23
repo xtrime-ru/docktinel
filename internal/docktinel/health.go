@@ -15,15 +15,17 @@ func Evaluate(s Status, container string, now float64, maxAge time.Duration) (bo
 	if s.Version != 1 || s.Instance == "" || s.Container != container {
 		return true, "state belongs to another container or has an unsupported schema"
 	}
-	if s.Heartbeat <= 0 || now < s.Heartbeat || now-s.Heartbeat > maxAge.Seconds() {
-		return true, "watchdog heartbeat expired or invalid"
-	}
-	switch s.Phase {
-	case "stopping":
+	// A shutdown snapshot has its own deadline and can outlive the daemon.
+	if s.Phase == "stopping" {
 		if s.StopDeadline <= 0 || now > s.StopDeadline {
 			return true, "shutdown deadline exceeded"
 		}
 		return false, "stopping: " + s.Reason
+	}
+	if s.Heartbeat <= 0 || now < s.Heartbeat || now-s.Heartbeat > maxAge.Seconds() {
+		return true, "watchdog heartbeat expired or invalid"
+	}
+	switch s.Phase {
 	case "configuring", "startup", "awaiting-main", "after-start":
 		if s.StartupDeadline <= 0 || now > s.StartupDeadline {
 			return true, "startup deadline exceeded"
@@ -121,7 +123,7 @@ func healthcheck(dir string, maxAge, stopGrace, missingGrace time.Duration, noKi
 		}
 	}
 	fatal, reason := Evaluate(s, container, now, maxAge)
-	if !sameProcess(s.Daemon) {
+	if s.Phase != "stopping" && !sameProcess(s.Daemon) {
 		fatal, reason = true, "watchdog process is gone or replaced"
 	}
 	if !fatal && s.Phase == "runtime" {
